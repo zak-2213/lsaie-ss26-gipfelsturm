@@ -1,61 +1,41 @@
 #!/bin/bash
 #
-# Usage: ./launch.sh <mode> <model_size>
+# Usage: ./launch.sh <mode> <model_size> [steps] [nodes]
 #
-# Modes:     throughput (50 steps, 15 min)
-#            quick      (50k steps, 30 min)
-#            medium     (50k steps, 2 hours)
-#            long       (50k steps, 4 hours)
+# Modes:     throughput  (50 steps, no logging)
+#            train       (N steps, with W&B and Tensorboard)
 #
 # Sizes:     125m, 350m, 760m, 1.5b, 3b, 8b
 #
-# Examples:  ./launch.sh throughput 8b
-#            ./launch.sh quick 760m
-#            ./launch.sh long 1.5b
+# Steps:     required for train mode (e.g., 1000, 5000, 15000)
+# Nodes:     optional, default 4 (max 8)
+#
+# Examples:  ./launch.sh throughput 760m
+#            ./launch.sh throughput 8b 50 1
+#            ./launch.sh train 760m 5000
+#            ./launch.sh train 1.5b 3000 8
 
 set -euo pipefail
 
-MODE=${1:?Usage: ./launch.sh <mode> <model_size>}
-MODEL_SIZE=${2:?Usage: ./launch.sh <mode> <model_size>}
+MODE=${1:?Usage: ./launch.sh <mode> <model_size> [steps] [nodes]}
+MODEL_SIZE=${2:?Usage: ./launch.sh <mode> <model_size> [steps] [nodes]}
 
 ################ Mode config ################
 case $MODE in
     throughput)
-        TIME=00:15:00
-        TRAINING_STEPS=50
-        EVAL_INTERVAL=50
+        TRAINING_STEPS=${3:-50}
+        NODES=${4:-4}
+        TIME=00:30:00
+        EVAL_INTERVAL=$TRAINING_STEPS
         EVAL_ITERS=0
         LR_WARMUP_ITERS=10
         LOGGING_EXTRA=""
         WANDB=false
         ;;
-    quick)
-        TIME=00:30:00
-        TRAINING_STEPS=500000
-        EVAL_INTERVAL=1000
-        EVAL_ITERS=10
-        LR_WARMUP_ITERS=200
-        LOGGING_EXTRA="
-    --tensorboard-dir \$TENSORBOARD_DIR
-    --log-timers-to-tensorboard
-    --log-memory-to-tensorboard"
-        WANDB=true
-        ;;
-    medium)
-        TIME=02:00:00
-        TRAINING_STEPS=500000
-        EVAL_INTERVAL=1000
-        EVAL_ITERS=10
-        LR_WARMUP_ITERS=200
-        LOGGING_EXTRA="
-    --tensorboard-dir \$TENSORBOARD_DIR
-    --log-timers-to-tensorboard
-    --log-memory-to-tensorboard"
-        WANDB=true
-        ;;
-    long)
-        TIME=04:00:00
-        TRAINING_STEPS=500000
+    train)
+        TRAINING_STEPS=${3:?Usage: ./launch.sh train <model_size> <steps> [nodes]}
+        NODES=${4:-4}
+        TIME=02:30:00
         EVAL_INTERVAL=1000
         EVAL_ITERS=10
         LR_WARMUP_ITERS=200
@@ -66,7 +46,7 @@ case $MODE in
         WANDB=true
         ;;
     *)
-        echo "Unknown mode: $MODE. Choose: throughput, quick, medium, long"
+        echo "Unknown mode: $MODE. Choose: throughput, train"
         exit 1
         ;;
 esac
@@ -105,7 +85,7 @@ esac
 
 GBS=256
 SEQ_LEN=4096
-JOB_NAME="gipfel-${MODE}-${MODEL_SIZE}"
+JOB_NAME="gipfel-${MODE}-${MODEL_SIZE}-${TRAINING_STEPS}s-${NODES}n"
 
 ################ W&B block ################
 if [ "$WANDB" = true ]; then
@@ -140,7 +120,7 @@ cat >> "$SCRIPT" << SBATCH_DIRECTIVES
 #SBATCH --job-name=${JOB_NAME}
 #SBATCH --output=logs/%x-%j.log
 #SBATCH --error=logs/%x-%j.log
-#SBATCH --nodes=4
+#SBATCH --nodes=${NODES}
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=4
 #SBATCH --cpus-per-task=288

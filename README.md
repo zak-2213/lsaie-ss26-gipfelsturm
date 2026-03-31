@@ -2,21 +2,21 @@
 
 *Gipfelsturm* (German: "summit attempt"), a race to *peak performance*. Inspired by nanoGPT/nanochat which are educational single-node setups, Gipfelsturm focuses on distributed LLM training on production-grade infrastructure. We use [Megatron-LM](https://github.com/NVIDIA/Megatron-LM), the de facto industry standard for distributed LLM training, running on the [CSCS Alps supercomputer](https://arxiv.org/abs/2507.02404) with [GH200 compute nodes connected via Slingshot-11](https://arxiv.org/abs/2408.11556).
 
-The challenge has two dimensions on which to improve:
+There are two dimensions on which you can improve. Your team should focus on at least one.
 
-### Challenge 1: improve loss or compare with alternative method given fixed wall-clock time
+### Challenge 1: improve loss or compare with alternative method given fixed time
 
-Who can achieve the lowest validation loss on 4 nodes (16 GPUs) given a fixed time budget? Model size, architecture, hyperparameters, and training recipe are all free choices. The only constraint is wall-clock time. Alternatively, compare different model sizes or architectures under the same time budget to study compute-optimal training.
+Compute the empirical throughput of your model and batch size. Then compute the number of tokens you can process in theory in a 30 min, 1 hour, and 2 hour time window. This defines the number of steps your model/batch size combination should be trained. Model size, learning rate, schedule, batch size, and training recipe are all your choice. The only constraint is the clock on the wall. Aim for lowest eval loss.
 
-| Wall-clock time | GPU-hours | Natural Model Scale |
-|----------------|-----------|---------------------|
+| Theoretical wall-clock time | GPU-hours (at 32 GPUs) | Natural Model Scale |
+|-----------------------------|------------------------|---------------------|
 | 30 min | 16 | 125m – 3b |
 | 1 hour | 32 | 3b – 8b |
 | 2 hours | 64 | 8b+ |
 
 ### Challenge 2: maximum throughput
 
-Who can achieve the highest training throughput for a given model size on 4 nodes (16 GPUs)? This measures pure systems efficiency: parallelism strategy, kernel optimization, communication overlap, and memory management.
+Achieve the highest tokens/sec/GPU for a given model size on up to 8 nodes (32 GPUs).
 
 | Model-Parallelism | Model Size | Systems Challenge |
 |--------------------|------------|-------------------|
@@ -62,21 +62,20 @@ We use the GPT-2 BPE tokenizer (`data/gpt2-vocab.json`, `data/gpt2-merges.txt`) 
 
 Training runs on the [Swiss AI Initiative's](https://swiss-ai.org) partition on Alps called Clariden, which uses SLURM.
 
-All training is launched via `launch.sh <mode> <model_size>`. The launcher generates a self-contained SLURM script in `logs/` for reproducibility and submits it. Model sizes: 125m, 350m, 760m, 1.5b, 3b, 8b.
+All training is launched via `launch.sh <mode> <model_size> [steps] [nodes]`. The launcher generates a self-contained SLURM script in `logs/` for reproducibility and submits it. Model sizes: 125m, 350m, 760m, 1.5b, 3b, 8b. Nodes default to 4 (max 8).
 
-**Throughput** mode runs 50 steps to measure tokens/sec/GPU:
+**Throughput** mode runs 50 steps (by default) to measure tokens/sec/GPU:
 
 ```bash
-./launch.sh throughput 8b
-./launch.sh throughput 760m
+./launch.sh throughput 760m           # 50 steps, 4 nodes
+./launch.sh throughput 8b 50 1        # 50 steps, 1 node
 ```
 
-**Quality** modes (quick/medium/long) differ only in wall-clock time. They enable W&B and Tensorboard logging:
+**Train** mode runs a specified number of steps with W&B and Tensorboard logging:
 
 ```bash
-./launch.sh quick 760m         # 30 min
-./launch.sh medium 1.5b        # 2 hours
-./launch.sh long 1.5b          # 4 hours
+./launch.sh train 760m 5000           # 5000 steps, 4 nodes
+./launch.sh train 1.5b 3000 8         # 3000 steps, 8 nodes
 ```
 
 **Single-GPU throughput baselines** (50 steps, SEQ_LEN=4096, TP=1, PP=1):
