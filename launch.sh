@@ -115,7 +115,7 @@ cat > "$SCRIPT" << 'HEADER'
 HEADER
 
 cat >> "$SCRIPT" << SBATCH_DIRECTIVES
-#SBATCH --account=infra01
+#SBATCH --account=lsaie-ss26
 #SBATCH --time=${TIME}
 #SBATCH --job-name=${JOB_NAME}
 #SBATCH --output=logs/%x-%j.log
@@ -150,7 +150,7 @@ TRAINING_STEPS=${TRAINING_STEPS}
 # Logging
 PROJECT_NAME=gipfelsturm
 EXP_NAME=${MODE}-${MODEL_SIZE}-\${SLURM_NNODES}n
-LOG_DIR=/iopsstor/scratch/cscs/\$USER/gipfelsturm/\$PROJECT_NAME/\$EXP_NAME
+LOG_DIR=\$WORKDIR/\$PROJECT_NAME/\$EXP_NAME
 TENSORBOARD_DIR=\$LOG_DIR/tensorboard
 CONFIGS
 
