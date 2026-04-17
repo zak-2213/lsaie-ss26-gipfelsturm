@@ -77,6 +77,12 @@ case $MODEL_SIZE in
         NUM_LAYERS=32; HIDDEN=4096; FFN=14336; HEADS=32; KV_HEADS=8
         MBS=2
         ;;
+    32b) NUM_LAYERS=64; HIDDEN=6144; FFN=16384; HEADS=48; KV_HEADS=8
+        MBS=1
+        ;;
+    140b) NUM_LAYERS=112; HIDDEN=10240; FFN=27648; HEADS=80; KV_HEADS=8
+        MBS=1
+        ;;
     *)
         echo "Unknown model size: $MODEL_SIZE. Choose: 125m, 350m, 760m, 1.5b, 3b, 8b"
         exit 1
