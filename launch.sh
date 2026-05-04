@@ -17,15 +17,41 @@
 
 set -euo pipefail
 
-MODE=${1:?Usage: ./launch.sh <mode> <model_size> [steps] [nodes]}
-MODEL_SIZE=${2:?Usage: ./launch.sh <mode> <model_size> [steps] [nodes]}
+usage() {
+    echo "Usage: $0 <mode> <model_size> [--steps=<steps>] [--nodes=<nodes>] [--time=<time>] [-d]"
+    exit 1
+}
+
+[[ $# -lt 2 ]] && usage
+MODE=${1}
+MODEL_SIZE=${2}
+shift 2
+
+PARSED=$(getopt -o d --long steps:,nodes:,time: --name "$0" -- "$@") || usage
+eval set -- "$PARSED"
+
+STEPS=""
+NODES=""
+TIME=""
+DRY_RUN=false
+
+while true; do
+    case "$1" in
+        --steps)  STEPS="$2";  shift 2 ;;
+        --nodes)  NODES="$2";  shift 2 ;;
+        --time)   TIME="$2";   shift 2 ;;
+        -d)       DRY_RUN=true;  shift ;;
+        --)       shift; break         ;;
+        *)        usage                ;;
+    esac
+done
 
 ################ Mode config ################
 case $MODE in
     throughput)
-        TRAINING_STEPS=${3:-50}
-        NODES=${4:-4}
-        TIME=00:30:00
+        TRAINING_STEPS=${STEPS:-50}
+        NODES=${NODES:-4}
+        TIME=${TIME:-00:30:00}
         EVAL_INTERVAL=$TRAINING_STEPS
         EVAL_ITERS=0
         LR_WARMUP_ITERS=10
@@ -33,8 +59,8 @@ case $MODE in
         WANDB=false
         ;;
     train)
-        TRAINING_STEPS=${3:?Usage: ./launch.sh train <model_size> <steps> [nodes]}
-        NODES=${4:-4}
+        TRAINING_STEPS=${STEPS}
+        NODES=${NODES:-4}
         TIME=02:30:00
         EVAL_INTERVAL=1000
         EVAL_ITERS=10
@@ -55,33 +81,33 @@ esac
 case $MODEL_SIZE in
     125m)
         NUM_LAYERS=12;  HIDDEN=768;  FFN=2048;  HEADS=12; KV_HEADS=4
-        MBS=16
+        MBS=16; TP=1; PP=1
         ;;
     350m)
         NUM_LAYERS=24; HIDDEN=1024; FFN=2816;  HEADS=16; KV_HEADS=4
-        MBS=8
+        MBS=8; TP=1; PP=1
         ;;
     760m)
         NUM_LAYERS=24; HIDDEN=1536; FFN=4096;  HEADS=16; KV_HEADS=4
-        MBS=4
+        MBS=4; TP=1; PP=1
         ;;
     1.5b)
         NUM_LAYERS=48; HIDDEN=1600; FFN=4352;  HEADS=20; KV_HEADS=4
-        MBS=4
+        MBS=4; TP=1; PP=1
         ;;
     3b)
         NUM_LAYERS=32; HIDDEN=3072; FFN=8192;  HEADS=24; KV_HEADS=8
-        MBS=4
+        MBS=4; TP=1; PP=1
         ;;
     8b)
         NUM_LAYERS=32; HIDDEN=4096; FFN=14336; HEADS=32; KV_HEADS=8
-        MBS=2
+        MBS=2; TP=1; PP=1
         ;;
     32b) NUM_LAYERS=64; HIDDEN=6144; FFN=16384; HEADS=48; KV_HEADS=8
-        MBS=1
+        MBS=1; TP=4; PP=1
         ;;
     140b) NUM_LAYERS=112; HIDDEN=10240; FFN=27648; HEADS=80; KV_HEADS=8
-        MBS=1
+        MBS=1; TP=4; PP=4
         ;;
     *)
         echo "Unknown model size: $MODEL_SIZE. Choose: 125m, 350m, 760m, 1.5b, 3b, 8b"
@@ -237,7 +263,7 @@ LEARNING_RATE_ARGS=(
 )
 TRAINING
 
-cat >> "$SCRIPT" << 'REST'
+cat >> "$SCRIPT" << REST
 
 INITIALIZATION_ARGS=(
     --seed 42
@@ -249,8 +275,8 @@ MIXED_PRECISION_ARGS=(
 )
 
 DISTRIBUTED_ARGS=(
-    --tensor-model-parallel-size 1
-    --pipeline-model-parallel-size 1
+    --tensor-model-parallel-size ${TP}
+    --pipeline-model-parallel-size ${PP}
     --use-distributed-optimizer
     --overlap-grad-reduce
     --overlap-param-gather
@@ -314,6 +340,11 @@ cat >> "$SCRIPT" << WANDB_INSERT
 ${WANDB_BLOCK}
 WANDB_INSERT
 
+cat >> "$SCRIPT" << 'ENV_VARS'
+export NVTE_DEBUG=1
+export NVTE_DEBUG_LEVEL=1
+ENV_VARS
+
 cat >> "$SCRIPT" << 'FOOTER'
 
 echo "CMD: $TRAINING_CMD"
@@ -325,4 +356,10 @@ FOOTER
 chmod +x "$SCRIPT"
 
 echo "Generated: $SCRIPT"
-sbatch "$SCRIPT"
+
+if [ $DRY_RUN != "true" ]; then
+    sbatch "$SCRIPT"
+else
+    echo "Dry run: not submitting to Slurm."
+    echo "$DRY_RUN"
+fi

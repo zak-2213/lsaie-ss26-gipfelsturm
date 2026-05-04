@@ -1,3 +1,5 @@
 logs/
 data/climbmix_small/
 core_*
+plots/
+flash-attention/
