@@ -1,0 +1,94 @@
+# Patch: Optional Liger-Kernel SwiGLU activation
+#
+# Problem:
+#   Megatron's bias_swiglu_impl uses a torch.jit-fused SwiGLU path
+#   (BiasSwiGLUFunction / SwiGLUFunction in fused_bias_swiglu.py).
+#   For the Liger-Kernel ablation we want to be able to swap the SwiGLU
+#   activation for Liger's Triton-fused LigerSiLUMulFunction without
+#   changing anything else (MLP TP layout, FC1/FC2, etc.).
+#
+# What this patch does:
+#   In megatron/core/fusions/fused_bias_swiglu.py:
+#     - Adds a guarded import of liger_kernel.ops.swiglu.LigerSiLUMulFunction.
+#     - Adds a helper _use_liger_swiglu() that reads USE_LIGER_SWIGLU at
+#       call time and raises ImportError loudly if USE_LIGER_SWIGLU=1 but
+#       liger_kernel is not installed (avoids silent fallback to baseline).
+#     - In bias_swiglu_impl(), if USE_LIGER_SWIGLU=1 and bias is None,
+#       routes the input through Liger by chunking and calling
+#       LigerSiLUMulFunction.apply(gate, up). Bias + Liger is unsupported
+#       (Liger has no bias path) and falls back with a one-time warning.
+#
+# Where in the code:
+#   File: megatron/core/fusions/fused_bias_swiglu.py
+#   Function: bias_swiglu_impl()
+#
+# How to fix if this patch breaks on a future Megatron version:
+#   Search for `bias_swiglu_impl` in fused_bias_swiglu.py and re-introduce
+#   the Liger branch near the top of the function, before the existing
+#   BiasSwiGLUFunction / SwiGLUFunction dispatch.
+#
+# Applied to: Megatron-LM core_v0.16.1
+#
+diff --git a/megatron/core/fusions/fused_bias_swiglu.py b/megatron/core/fusions/fused_bias_swiglu.py
+index 632470876..f0e19bc2a 100644
+--- a/megatron/core/fusions/fused_bias_swiglu.py
++++ b/megatron/core/fusions/fused_bias_swiglu.py
+@@ -3,12 +3,35 @@
+
+ # pylint: disable=missing-function-docstring, missing-class-docstring
+
++import os
++import warnings
++
+ import torch
+ import torch.nn.functional as F
+
+ from megatron.core.jit import jit_fuser
+ from megatron.core.utils import nvtx_decorator
+
++try:
++    from liger_kernel.ops.swiglu import LigerSiLUMulFunction
++    _HAVE_LIGER_SWIGLU = True
++except ImportError:
++    LigerSiLUMulFunction = None
++    _HAVE_LIGER_SWIGLU = False
++
++_warned_liger_bias = False
++
++
++def _use_liger_swiglu() -> bool:
++    if os.environ.get("USE_LIGER_SWIGLU", "0") != "1":
++        return False
++    if not _HAVE_LIGER_SWIGLU:
++        raise ImportError(
++            "USE_LIGER_SWIGLU=1 but `liger_kernel` is not installed. "
++            "Install with `pip install liger-kernel`."
++        )
++    return True
++
+ ###### BIAS SWIGLU FUSION/ NO AUTOGRAD ################
+
+
+@@ -227,6 +250,22 @@ def bias_swiglu_impl(input, bias, fp8_input_store=False, cpu_offload_input=False
+     """
+     ori_shape = input.shape
+     assert len(ori_shape) in [2, 3]
++
++    if _use_liger_swiglu():
++        if bias is None:
++            x = input.view(-1, ori_shape[-1])
++            gate, up = torch.chunk(x, 2, dim=-1)
++            output = LigerSiLUMulFunction.apply(gate, up)
++            return output if len(ori_shape) == 2 else output.view(ori_shape[0], ori_shape[1], -1)
++        else:
++            global _warned_liger_bias
++            if not _warned_liger_bias:
++                warnings.warn(
++                    "USE_LIGER_SWIGLU=1 but bias is not None; Liger has no bias path. "
++                    "Falling back to Megatron's BiasSwiGLUFunction."
++                )
++                _warned_liger_bias = True
++
+     input = input.view(-1, ori_shape[-1])
+     if bias is not None:
+         output = BiasSwiGLUFunction.apply(input, bias, fp8_input_store, cpu_offload_input)
