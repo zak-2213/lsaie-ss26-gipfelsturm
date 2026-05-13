@@ -29,6 +29,9 @@ case $MODE in
         EVAL_INTERVAL=$TRAINING_STEPS
         EVAL_ITERS=0
         LR_WARMUP_ITERS=10
+        if [ "$LR_WARMUP_ITERS" -ge "$TRAINING_STEPS" ]; then
+            LR_WARMUP_ITERS=$(( TRAINING_STEPS - 1 ))
+        fi
         LOGGING_EXTRA=""
         WANDB=false
         ;;
