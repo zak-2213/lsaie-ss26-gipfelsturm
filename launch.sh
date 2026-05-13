@@ -52,10 +52,6 @@ case $MODE in
 esac
 
 ################ Model config ################
-# TP/PP defaults follow the course "Systems Challenge" table:
-#   single-GPU (<=8B) -> TP=1, PP=1
-#   single-node 32B   -> TP=4, PP=1  (intra-node tensor parallelism)
-#   multi-node 140B   -> TP=4, PP=4
 TP=1
 PP=1
 case $MODEL_SIZE in
@@ -98,14 +94,21 @@ case $MODEL_SIZE in
         ;;
 esac
 
-# Sequence parallelism pairs naturally with TP>1 (slices activations along the
-# sequence dim across TP ranks, recovering the TP-x activation memory savings).
 SEQ_PARALLEL_ARG=""
 if [ "$TP" -gt 1 ]; then
     SEQ_PARALLEL_ARG="--sequence-parallel"
 fi
 
-# Sanity-check that we have enough GPUs for the requested parallelism.
+DEFAULT_RECOMPUTE=none
+case $MODEL_SIZE in
+    32b|140b) DEFAULT_RECOMPUTE=selective ;;
+esac
+RECOMPUTE=${RECOMPUTE:-$DEFAULT_RECOMPUTE}
+RECOMPUTE_ARG=""
+if [ "$RECOMPUTE" != "none" ]; then
+    RECOMPUTE_ARG="--recompute-granularity $RECOMPUTE"
+fi
+
 GPUS_PER_NODE=4
 TOTAL_GPUS=$((NODES * GPUS_PER_NODE))
 NEEDED_GPUS=$((TP * PP))
@@ -114,10 +117,6 @@ if [ "$TOTAL_GPUS" -lt "$NEEDED_GPUS" ]; then
     exit 1
 fi
 
-# GBS can be overridden via env var for cheap throughput sweeps:
-#   GBS=32 ./launch.sh throughput 32b 50 1
-# Per course guidance ("throughput runs only need a dozen steps to be accurate"),
-# a smaller GBS keeps each step short so 50 logged steps fit in the SLURM TIME budget.
 GBS=${GBS:-256}
 SEQ_LEN=4096
 JOB_NAME="gipfel-${MODE}-${MODEL_SIZE}-${TRAINING_STEPS}s-${NODES}n"
@@ -248,6 +247,7 @@ TRAINING_ARGS=(
     --no-check-for-nan-in-loss-and-grad
     --manual-gc
     --manual-gc-interval 50
+    ${RECOMPUTE_ARG}
 )
 
 REGULARIZATION_ARGS=(
