@@ -55,35 +55,35 @@ esac
 case $MODEL_SIZE in
     125m)
         NUM_LAYERS=12;  HIDDEN=768;  FFN=512;   HEADS=12; KV_HEADS=4
-        NUM_EXPERTS=4;  MOE_TOPK=1;  EP=1; MBS=16
+        NUM_EXPERTS=4;  MOE_TOPK=1; EP=1; PP=1; TP=1; MBS=16
         ;;
     350m)
         NUM_LAYERS=24; HIDDEN=1024; FFN=704;  HEADS=16; KV_HEADS=4
-        NUM_EXPERTS=4;  MOE_TOPK=1;  EP=1; MBS=8
+        NUM_EXPERTS=4;  MOE_TOPK=1; EP=1; PP=1; TP=1; MBS=8
         ;;
     760m)
         NUM_LAYERS=24; HIDDEN=1536; FFN=1024;  HEADS=16; KV_HEADS=4
-        NUM_EXPERTS=4;  MOE_TOPK=1;  EP=1; MBS=4
+        NUM_EXPERTS=4;  MOE_TOPK=1; EP=1; TP=1; PP=1; MBS=4
         ;;
     1.5b)
         NUM_LAYERS=48; HIDDEN=1600; FFN=1088;  HEADS=20; KV_HEADS=4
-        NUM_EXPERTS=4;  MOE_TOPK=1;  EP=1; MBS=4
+        NUM_EXPERTS=4;  MOE_TOPK=1; EP=1; TP=1; PP=1; MBS=4
         ;;
     3b)
         NUM_LAYERS=32; HIDDEN=3072; FFN=1024;  HEADS=24; KV_HEADS=8
-        NUM_EXPERTS=8; MOE_TOPK=1;  EP=2; MBS=4
+        NUM_EXPERTS=8; MOE_TOPK=1; EP=2; TP=1; PP=1; MBS=4
         ;;
     8b)
         NUM_LAYERS=32; HIDDEN=4096; FFN=1792;  HEADS=32; KV_HEADS=8
-        NUM_EXPERTS=8; MOE_TOPK=1;  EP=2; MBS=2
+        NUM_EXPERTS=8; MOE_TOPK=1; EP=2; TP=1; PP=1; MBS=2
         ;;
     32b)
         NUM_LAYERS=64; HIDDEN=6144; FFN=1024;  HEADS=48; KV_HEADS=8
-        NUM_EXPERTS=16; MOE_TOPK=1;  EP=4; MBS=1
+        NUM_EXPERTS=16; MOE_TOPK=1; EP=1; TP=4; PP=1; MBS=1
         ;;
     140b)
         NUM_LAYERS=112; HIDDEN=10240; FFN=1728; HEADS=80; KV_HEADS=8
-        NUM_EXPERTS=16; MOE_TOPK=1;   EP=8; MBS=1
+        NUM_EXPERTS=16; MOE_TOPK=1; EP=1; TP=4; PP=4; MBS=1
         ;;
 esac
 
@@ -193,13 +193,13 @@ NETWORK_SIZE_ARGS=(
     --group-query-attention
     --num-query-groups ${KV_HEADS}
     --num-experts ${NUM_EXPERTS}
-    --expert-model-parallel-size ${EP}
     --max-position-embeddings \$SEQ_LEN
     --position-embedding-type rope
     --normalization RMSNorm
     --swiglu
     --untie-embeddings-and-output-weights
     --seq-length \$SEQ_LEN
+    --sequence-parallel   # only needed when using TP with MoE
 )
 
 MOE_ARGS=(
@@ -209,6 +209,8 @@ MOE_ARGS=(
     --moe-router-score-function sigmoid
     --moe-router-enable-expert-bias
     --moe-router-topk ${MOE_TOPK}
+    --expert-model-parallel-size ${EP}
+    # --overlap-moe-expert-parallel-comm    # only needed when using EP
 )
 MODEL
 
@@ -248,7 +250,7 @@ LEARNING_RATE_ARGS=(
 )
 TRAINING
 
-cat >> "$SCRIPT" << 'REST'
+cat >> "$SCRIPT" << REST
 
 INITIALIZATION_ARGS=(
     --seed 42
@@ -260,11 +262,12 @@ MIXED_PRECISION_ARGS=(
 )
 
 DISTRIBUTED_ARGS=(
-    --tensor-model-parallel-size 1
-    --pipeline-model-parallel-size 1
+    --tensor-model-parallel-size ${TP}
+    --pipeline-model-parallel-size ${PP}
     --use-distributed-optimizer
     --overlap-grad-reduce
     --overlap-param-gather
+    --data-parallel-sharding-strategy optim_grads_params
 )
 
 LOGGING_ARGS=(
