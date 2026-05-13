@@ -114,7 +114,11 @@ if [ "$TOTAL_GPUS" -lt "$NEEDED_GPUS" ]; then
     exit 1
 fi
 
-GBS=256
+# GBS can be overridden via env var for cheap throughput sweeps:
+#   GBS=32 ./launch.sh throughput 32b 50 1
+# Per course guidance ("throughput runs only need a dozen steps to be accurate"),
+# a smaller GBS keeps each step short so 50 logged steps fit in the SLURM TIME budget.
+GBS=${GBS:-256}
 SEQ_LEN=4096
 JOB_NAME="gipfel-${MODE}-${MODEL_SIZE}-${TRAINING_STEPS}s-${NODES}n"
 
