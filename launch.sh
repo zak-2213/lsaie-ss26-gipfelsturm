@@ -101,12 +101,14 @@ fi
 
 DEFAULT_RECOMPUTE=none
 case $MODEL_SIZE in
-    32b|140b) DEFAULT_RECOMPUTE=selective ;;
+    32b|140b) DEFAULT_RECOMPUTE=full ;;
 esac
 RECOMPUTE=${RECOMPUTE:-$DEFAULT_RECOMPUTE}
 RECOMPUTE_ARG=""
-if [ "$RECOMPUTE" != "none" ]; then
-    RECOMPUTE_ARG="--recompute-granularity $RECOMPUTE"
+if [ "$RECOMPUTE" = "full" ]; then
+    RECOMPUTE_ARG="--recompute-granularity full --recompute-method uniform --recompute-num-layers 1"
+elif [ "$RECOMPUTE" = "selective" ]; then
+    RECOMPUTE_ARG="--recompute-granularity selective"
 fi
 
 GPUS_PER_NODE=4
