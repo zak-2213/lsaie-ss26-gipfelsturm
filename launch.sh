@@ -138,6 +138,8 @@ USE_LIGER_ROPE=${USE_LIGER_ROPE:-0}
 USE_LIGER_RMSNORM=${USE_LIGER_RMSNORM:-0}
 USE_LIGER_CE=${USE_LIGER_CE:-0}
 
+NSYS=${NSYS:-0}
+
 ################ W&B block ################
 if [ "$WANDB" = true ]; then
     WANDB_BLOCK='
@@ -203,6 +205,7 @@ export USE_LIGER_SWIGLU=${USE_LIGER_SWIGLU}
 export USE_LIGER_ROPE=${USE_LIGER_ROPE}
 export USE_LIGER_RMSNORM=${USE_LIGER_RMSNORM}
 export USE_LIGER_CE=${USE_LIGER_CE}
+export NSYS=${NSYS}
 
 # Logging
 PROJECT_NAME=gipfelsturm
@@ -256,6 +259,11 @@ MODEL
 
 cat >> "$SCRIPT" << TRAINING
 
+PROFILE_ARG=""
+if [ "${NSYS}" = "1" ]; then
+    PROFILE_ARG="--profile"
+fi
+
 TRAINING_ARGS=(
     --micro-batch-size \$MBS
     --global-batch-size \$GBS
@@ -271,6 +279,7 @@ TRAINING_ARGS=(
     --manual-gc
     --manual-gc-interval 50
     ${RECOMPUTE_ARG}
+    \$PROFILE_ARG
 )
 
 REGULARIZATION_ARGS=(
@@ -348,7 +357,13 @@ TORCHRUN_ARGS=(
     --tee 3
 )
 
-TRAINING_CMD="torchrun ${TORCHRUN_ARGS[@]} $MEGATRON_LM_DIR/pretrain_gpt.py \
+NSYS_PREFIX=""
+if [ "${NSYS:-0}" = "1" ]; then
+    NSYS_OUT=$LOG_DIR/nsys-$EXP_NAME-$SLURM_JOB_ID
+    NSYS_PREFIX="nsys profile --output=$NSYS_OUT --capture-range=cudaProfilerApi --capture-range-end=stop --force-overwrite=true --trace=cuda,nvtx,osrt --sample=none"
+fi
+
+TRAINING_CMD="$NSYS_PREFIX torchrun ${TORCHRUN_ARGS[@]} $MEGATRON_LM_DIR/pretrain_gpt.py \
     ${TRANSFORMER_ENGINE_ARGS[@]} \
     ${NETWORK_SIZE_ARGS[@]} \
     ${TRAINING_ARGS[@]} \
