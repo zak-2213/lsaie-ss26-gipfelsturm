@@ -52,6 +52,12 @@ case $MODE in
 esac
 
 ################ Model config ################
+# TP/PP defaults follow the course "Systems Challenge" table:
+#   single-GPU (<=8B) -> TP=1, PP=1
+#   single-node 32B   -> TP=4, PP=1  (intra-node tensor parallelism)
+#   multi-node 140B   -> TP=4, PP=4
+TP=1
+PP=1
 case $MODEL_SIZE in
     125m)
         NUM_LAYERS=12;  HIDDEN=768;  FFN=2048;  HEADS=12; KV_HEADS=4
@@ -79,15 +85,34 @@ case $MODEL_SIZE in
         ;;
     32b) NUM_LAYERS=64; HIDDEN=6144; FFN=16384; HEADS=48; KV_HEADS=8
         MBS=1
+        TP=4
         ;;
     140b) NUM_LAYERS=112; HIDDEN=10240; FFN=27648; HEADS=80; KV_HEADS=8
         MBS=1
+        TP=4
+        PP=4
         ;;
     *)
-        echo "Unknown model size: $MODEL_SIZE. Choose: 125m, 350m, 760m, 1.5b, 3b, 8b"
+        echo "Unknown model size: $MODEL_SIZE. Choose: 125m, 350m, 760m, 1.5b, 3b, 8b, 32b, 140b"
         exit 1
         ;;
 esac
+
+# Sequence parallelism pairs naturally with TP>1 (slices activations along the
+# sequence dim across TP ranks, recovering the TP-x activation memory savings).
+SEQ_PARALLEL_ARG=""
+if [ "$TP" -gt 1 ]; then
+    SEQ_PARALLEL_ARG="--sequence-parallel"
+fi
+
+# Sanity-check that we have enough GPUs for the requested parallelism.
+GPUS_PER_NODE=4
+TOTAL_GPUS=$((NODES * GPUS_PER_NODE))
+NEEDED_GPUS=$((TP * PP))
+if [ "$TOTAL_GPUS" -lt "$NEEDED_GPUS" ]; then
+    echo "Error: model $MODEL_SIZE needs TP=$TP PP=$PP ($NEEDED_GPUS GPUs) but only $TOTAL_GPUS GPUs requested ($NODES nodes x $GPUS_PER_NODE)."
+    exit 1
+fi
 
 GBS=256
 SEQ_LEN=4096
@@ -247,14 +272,20 @@ INITIALIZATION_ARGS=(
 MIXED_PRECISION_ARGS=(
     --bf16
 )
+REST
 
+cat >> "$SCRIPT" << DISTRIBUTED
 DISTRIBUTED_ARGS=(
-    --tensor-model-parallel-size 1
-    --pipeline-model-parallel-size 1
+    --tensor-model-parallel-size ${TP}
+    --pipeline-model-parallel-size ${PP}
+    ${SEQ_PARALLEL_ARG}
     --use-distributed-optimizer
     --overlap-grad-reduce
     --overlap-param-gather
 )
+DISTRIBUTED
+
+cat >> "$SCRIPT" << 'REST'
 
 LOGGING_ARGS=(
     --log-throughput
