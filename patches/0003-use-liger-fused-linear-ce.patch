@@ -1,0 +1,105 @@
+# Patch: Optional Liger-Kernel FusedLinearCrossEntropy
+#
+# Problem:
+#   At TP=1 (the Single-GPU 8B sub-challenge), Megatron materialises the full
+#   [B*S, V] logits tensor via the output_layer projection before computing
+#   cross-entropy. Liger's LigerFusedLinearCrossEntropyLoss fuses the final
+#   linear and CE in a single Triton kernel that never materialises the full
+#   logits tensor, saving activation memory and the corresponding HBM traffic.
+#
+#   This kernel is only useful at TP=1. With TP>1, Megatron's output_layer
+#   is a vocab-sharded ColumnParallelLinear; the kernel would need a
+#   vocab-parallel variant. We assert TP=1 inside the patch.
+#
+# What this patch does:
+#   In megatron/core/models/gpt/gpt_model.py:
+#     - Adds a guarded import of LigerFusedLinearCrossEntropyLoss.
+#     - Adds _use_liger_fused_linear_ce() that reads USE_LIGER_FUSED_LINEAR_CE
+#       at call time and raises ImportError loudly if the env var is set
+#       but liger_kernel is not installed (avoid silent fallback).
+#     - Adds _liger_fused_linear_ce_loss() that takes hidden_states,
+#       output_weight, labels and returns a [b, s] per-token loss tensor
+#       (reduction='none' so Megatron's loss_func can still apply loss_mask).
+#     - In GPTModel.forward, before the output_layer projection, branches
+#       to the Liger path when USE_LIGER_FUSED_LINEAR_CE=1 and labels are
+#       provided. Returns the loss tensor directly, bypassing the output_layer
+#       call entirely (avoiding [B*S, V] materialisation).
+#
+# Where in the code:
+#   File: megatron/core/models/gpt/gpt_model.py
+#   Function: GPTModel.forward(), just before the self.output_layer(...) call.
+#
+# How to fix if this patch breaks on a future Megatron version:
+#   Search for `self.output_layer(` in gpt_model.py forward. Re-insert the
+#   `_use_liger_fused_linear_ce()` branch immediately before that call. The
+#   helper functions are module-level after the imports.
+#
+# Applied to: Megatron-LM core_v0.16.1
+#
+diff --git a/megatron/core/models/gpt/gpt_model.py b/megatron/core/models/gpt/gpt_model.py
+index e287344c1..0d5afadfc 100644
+--- a/megatron/core/models/gpt/gpt_model.py
++++ b/megatron/core/models/gpt/gpt_model.py
+@@ -1,5 +1,6 @@
+ # Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
++import os
+ from collections import OrderedDict
+ from typing import Dict, Literal, Optional
+
+@@ -41,6 +42,35 @@ from megatron.core.utils import (
+     is_using_quantization_scales,
+ )
+
++try:
++    from liger_kernel.transformers.fused_linear_cross_entropy import (
++        LigerFusedLinearCrossEntropyLoss,
++    )
++    _HAVE_LIGER_FUSED_LINEAR_CE = True
++except ImportError:
++    LigerFusedLinearCrossEntropyLoss = None
++    _HAVE_LIGER_FUSED_LINEAR_CE = False
++
++
++def _use_liger_fused_linear_ce() -> bool:
++    if os.environ.get("USE_LIGER_FUSED_LINEAR_CE", "0") != "1":
++        return False
++    if not _HAVE_LIGER_FUSED_LINEAR_CE:
++        raise ImportError(
++            "USE_LIGER_FUSED_LINEAR_CE=1 but `liger_kernel` is not installed. "
++            "Install with `pip install liger-kernel`."
++        )
++    return True
++
++
++def _liger_fused_linear_ce_loss(hidden_states, output_weight, labels, bias=None):
++    s, b, h = hidden_states.shape
++    flat_hidden = hidden_states.transpose(0, 1).contiguous().view(-1, h)
++    flat_labels = labels.contiguous().view(-1)
++    loss_fn = LigerFusedLinearCrossEntropyLoss(reduction="none")
++    loss = loss_fn(output_weight, flat_hidden, flat_labels, bias)
++    return loss.view(b, s)
++
+
+ class GPTModel(LanguageModule):
+     """GPT Transformer language model.
+@@ -682,6 +712,19 @@ class GPTModel(LanguageModule):
+                     hidden_states.squeeze(1).unsqueeze(0)
+                 ).unsqueeze(1)
+
++        if _use_liger_fused_linear_ce() and labels is not None:
++            tp_size = parallel_state.get_tensor_model_parallel_world_size()
++            assert tp_size == 1, (
++                f"USE_LIGER_FUSED_LINEAR_CE requires TP=1 (vocab-sharded weight is "
++                f"incompatible with the kernel); got TP={tp_size}."
++            )
++            output_weight_for_liger = (
++                output_weight if output_weight is not None else self.output_layer.weight
++            )
++            return _liger_fused_linear_ce_loss(
++                hidden_states, output_weight_for_liger, labels
++            )
++
+         logits, _ = self.output_layer(
+             hidden_states, weight=output_weight, runtime_gather_output=runtime_gather_output
+         )
