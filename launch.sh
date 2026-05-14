@@ -139,6 +139,11 @@ USE_LIGER_RMSNORM=${USE_LIGER_RMSNORM:-0}
 USE_LIGER_CE=${USE_LIGER_CE:-0}
 USE_LIGER_FUSED_LINEAR_CE=${USE_LIGER_FUSED_LINEAR_CE:-0}
 
+OVERLAP_PARAM_GATHER_ARG="--overlap-param-gather"
+if [ "$USE_LIGER_FUSED_LINEAR_CE" = "1" ]; then
+    OVERLAP_PARAM_GATHER_ARG=""
+fi
+
 NSYS=${NSYS:-0}
 
 ################ W&B block ################
@@ -319,7 +324,7 @@ DISTRIBUTED_ARGS=(
     ${SEQ_PARALLEL_ARG}
     --use-distributed-optimizer
     --overlap-grad-reduce
-    --overlap-param-gather
+    ${OVERLAP_PARAM_GATHER_ARG}
 )
 DISTRIBUTED
 

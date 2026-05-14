@@ -11,6 +11,16 @@
 #   is a vocab-sharded ColumnParallelLinear; the kernel would need a
 #   vocab-parallel variant. We assert TP=1 inside the patch.
 #
+# Required launcher setting:
+#   --overlap-param-gather MUST be disabled when USE_LIGER_FUSED_LINEAR_CE=1.
+#   Megatron's overlap-param-gather registers per-bucket pre-forward hooks
+#   to async-prefetch the next bucket; bypassing the output_layer call
+#   leaves bucket 1's (output_layer.weight) param-gather state half-completed
+#   and the next iteration's first forward trips
+#   `assert self.param_gather_handle is None` in param_and_grad_buffer.py.
+#   `launch.sh` gates `--overlap-param-gather` on USE_LIGER_FUSED_LINEAR_CE
+#   and drops it when this kernel is enabled.
+#
 # What this patch does:
 #   In megatron/core/models/gpt/gpt_model.py:
 #     - Adds a guarded import of LigerFusedLinearCrossEntropyLoss.
