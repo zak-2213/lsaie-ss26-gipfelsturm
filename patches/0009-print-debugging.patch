@@ -1,0 +1,77 @@
+diff --git a/megatron/core/extensions/transformer_engine.py b/megatron/core/extensions/transformer_engine.py
+index ef8527e9e..faec9565b 100644
+--- a/megatron/core/extensions/transformer_engine.py
++++ b/megatron/core/extensions/transformer_engine.py
+@@ -1168,6 +1168,8 @@ class TEDotProductAttention(te.pytorch.DotProductAttention):
+                 "Please install it with `pip install transformer-engine`."
+             )
+ 
++        print(f"[GUGUS] Initializing TEDotProductAttention with TE version {get_te_version()}")
++
+         self.config = config
+         self.te_forward_mask_type = False
+         self.qkv_format: str = "sbhd"
+diff --git a/megatron/core/models/common/language_module/language_module.py b/megatron/core/models/common/language_module/language_module.py
+index b0fa6126b..8914303fc 100644
+--- a/megatron/core/models/common/language_module/language_module.py
++++ b/megatron/core/models/common/language_module/language_module.py
+@@ -104,6 +104,10 @@ class LanguageModule(MegatronModule):
+             ), f'{env_variable_name} set to {current_value}, but expected {expected_value} for attention backend type {attn_type.name}. unset NVTE_FLASH_ATTN, NVTE_FUSED_ATTN and NVTE_UNFUSED_ATTN. Use the --attention-backend argument if you want to choose between (flash/fused/unfused/auto/local). Default is auto.'
+             os.environ[env_variable_name] = str(expected_value)
+ 
++        print(f"Setting env variable for attention backend {self.config.attention_backend.name}")
++        os.environ["NVTE_DEBUG"] = "1"
++        os.environ["NVTE_DEBUG_LEVEL"] = "1"
++
+         if self.config.attention_backend == AttnBackend.local:
+             check_and_set_env_variable("NVTE_FLASH_ATTN", 0, AttnBackend.flash)
+             check_and_set_env_variable("NVTE_FUSED_ATTN", 0, AttnBackend.flash)
+diff --git a/megatron/core/transformer/attention.py b/megatron/core/transformer/attention.py
+index 2200b5582..4a83ddc0d 100644
+--- a/megatron/core/transformer/attention.py
++++ b/megatron/core/transformer/attention.py
+@@ -254,6 +254,8 @@ class Attention(MegatronModule, ABC):
+     ):
+         super().__init__(config=config)
+ 
++        print(f"[GUGUS] Initializing Attention with {layer_number} layers and {attention_type} attention. Has Flash Attention 3: {HAVE_FA3}, FlashMLA: {HAVE_FMLA}, Flash Decoding: {flash_attn_with_kvcache is not None}, TE: {HAVE_TE}")
++
+         self.config = config
+         self.layer_number = layer_number
+ 
+@@ -1132,6 +1134,7 @@ class Attention(MegatronModule, ABC):
+ 
+         nvtx_range_push(suffix="core_attention")
+         if self.checkpoint_core_attention and self.training:
++            print(f"[GUGUS] Attention::forward::if: using core attention module with checkpoints for attention computation.")
+             core_attn_out = self._checkpointed_attention_forward(
+                 query,
+                 key,
+@@ -1143,6 +1146,7 @@ class Attention(MegatronModule, ABC):
+             )
+         else:
+             if inference_context is None or inference_context.is_static_batching():
++                print(f"[GUGUS] Attention::forward::else_if: using core attention module without checkpoints for attention computation. {self.offload_core_attention=}, {self.training=}")
+                 # Static batching attention kernel.
+                 with off_interface(
+                     self.offload_core_attention and self.training, query, "core_attn"
+@@ -1158,6 +1162,7 @@ class Attention(MegatronModule, ABC):
+                     )
+ 
+             else:
++                print(f"[GUGUS] Attention::forward::else_else: using flash attention kernel with dynamic batching.")
+                 # Dynamic batching attention kernel.
+                 q, k, v = (query, key, value)
+                 cu_query_lengths, max_seqlen_q = inference_context.cu_query_lengths()
+diff --git a/megatron/core/transformer/dot_product_attention.py b/megatron/core/transformer/dot_product_attention.py
+index 69039e0bf..4e4dced2f 100644
+--- a/megatron/core/transformer/dot_product_attention.py
++++ b/megatron/core/transformer/dot_product_attention.py
+@@ -51,6 +51,7 @@ class DotProductAttention(MegatronModule):
+         pg_collection: Optional[ProcessGroupCollection] = None,
+     ):
+         super().__init__(config=config)
++        print(f"[GUGUS] Initializing DotProductAttention with {layer_number} layers and {attention_type} attention.")
+ 
+         self.config: TransformerConfig = config
+ 

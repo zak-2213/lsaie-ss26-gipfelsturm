@@ -1,0 +1,13 @@
+# image = "/iopsstor/scratch/cscs/course_00220/flashattn3_20260518_092753.sqsh"
+# image = "/iopsstor/scratch/cscs/course_00220/flashattn3_20260518_101554.sqsh"
+# image = "/iopsstor/scratch/cscs/course_00220/flashattn3_torch_custom.sqsh"
+image = "/iopsstor/scratch/cscs/course_00220/flashattn3_20260519_082239.sqsh"
+mounts = ["/capstor:/capstor", "/users:/users", "/iopsstor:/iopsstor"]
+# workdir = "/users/course_00220"
+writable = true
+
+[env]
+PMIX_MCA_psec = "native"
+
+[annotations]
+com.hooks.cxi.enabled = "false"

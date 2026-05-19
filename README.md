@@ -200,3 +200,18 @@ As we upgrade Megatron-LM to a new release version, we will attempt to apply all
 ## Dependencies
 
 - [Megatron-LM](https://github.com/NVIDIA/Megatron-LM) `core_v0.16.1` (included as git submodule)
+
+## Patch flash-attention
+
+The flash-attention package does not correctly build the package for Megatron-LM and TransformerEngine. To build the environment file correctly, use the following commands:
+
+```bash
+git clone https://github.com/Dao-AILab/flash-attention.git flash-attention
+cp setup.py flash-attention/hopper/setup.py
+cp flash-attention/hopper/flash_attn_interface.py flash-attention/hopper/flash_attn_3/flash_attn_interface.py
+cp flash-attention/hopper/__init__.py flash-attention/hopper/flash_attn_3/__init__.py
+sbatch build-pod-image.patch
+```
+
+This creates a sqsh file one folder up this directory. Add the path to [flashattn3.toml](./flashattn3.toml).
+
