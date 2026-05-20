@@ -18,7 +18,7 @@
 set -euo pipefail
 
 usage() {
-    echo "Usage: $0 <mode> <model_size> [--steps=<steps>] [--nodes=<nodes>] [--time=<time>] [-d]"
+    echo "Usage: $0 <mode> <model_size> [--steps=<steps>] [--nodes=<nodes>] [--time=<time>] [--environment=<env>] [-d]"
     exit 1
 }
 
@@ -27,19 +27,21 @@ MODE=${1}
 MODEL_SIZE=${2}
 shift 2
 
-PARSED=$(getopt -o d --long steps:,nodes:,time: --name "$0" -- "$@") || usage
+PARSED=$(getopt -o d --long steps:,nodes:,time:,environment: --name "$0" -- "$@") || usage
 eval set -- "$PARSED"
 
 STEPS=""
 NODES=""
 TIME=""
 DRY_RUN=false
+ENVIRONMENT="alps3"
 
 while true; do
     case "$1" in
         --steps)  STEPS="$2";  shift 2 ;;
         --nodes)  NODES="$2";  shift 2 ;;
         --time)   TIME="$2";   shift 2 ;;
+        --environment)  ENVIRONMENT="$2";  shift 2 ;;
         -d)       DRY_RUN=true;  shift ;;
         --)       shift; break         ;;
         *)        usage                ;;
@@ -77,6 +79,14 @@ case $MODE in
         ;;
 esac
 
+echo "Mode: $MODE"
+echo "Model size: $MODEL_SIZE"
+echo "Training steps: $TRAINING_STEPS"
+echo "Nodes: $NODES"
+echo "Time: $TIME"
+ENV_NAME=$(basename $ENVIRONMENT)
+echo "Environment: $ENVIRONMENT (${ENV_NAME%.*})"
+
 ################ Model config ################
 case $MODEL_SIZE in
     125m)
@@ -110,14 +120,14 @@ case $MODEL_SIZE in
         MBS=1; TP=4; PP=4
         ;;
     *)
-        echo "Unknown model size: $MODEL_SIZE. Choose: 125m, 350m, 760m, 1.5b, 3b, 8b"
+        echo "Unknown model size: $MODEL_SIZE. Choose: 125m, 350m, 760m, 1.5b, 3b, 8b, 32b, 140b"
         exit 1
         ;;
 esac
 
 GBS=256
 SEQ_LEN=4096
-JOB_NAME="gipfel-${MODE}-${MODEL_SIZE}-${TRAINING_STEPS}s-${NODES}n"
+JOB_NAME="gipfel-${MODE}-${MODEL_SIZE}-${TRAINING_STEPS}s-${NODES}n-${ENV_NAME%.*}"
 
 ################ W&B block ################
 if [ "$WANDB" = true ]; then
@@ -345,12 +355,12 @@ export NVTE_DEBUG=1
 export NVTE_DEBUG_LEVEL=1
 ENV_VARS
 
-cat >> "$SCRIPT" << 'FOOTER'
+cat >> "$SCRIPT" << FOOTER
 
-echo "CMD: $TRAINING_CMD"
-srun -lu --mpi=pmix --network=disable_rdzv_get --environment=/iopsstor/scratch/cscs/course_00220/lsaie-ss26-gipfelsturm/flashattn3.toml --cpus-per-task $SLURM_CPUS_PER_TASK --wait 60 bash -c "numactl --membind=0-3 $TRAINING_CMD"
+echo "CMD: \$TRAINING_CMD"
+srun -lu --mpi=pmix --network=disable_rdzv_get --environment=$ENVIRONMENT --cpus-per-task \$SLURM_CPUS_PER_TASK --wait 60 bash -c "numactl --membind=0-3 \$TRAINING_CMD"
 
-echo "END TIME: $(date)"
+echo "END TIME: \$(date)"
 FOOTER
 
 chmod +x "$SCRIPT"
@@ -361,5 +371,4 @@ if [ $DRY_RUN != "true" ]; then
     sbatch "$SCRIPT"
 else
     echo "Dry run: not submitting to Slurm."
-    echo "$DRY_RUN"
 fi
