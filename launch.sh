@@ -5,15 +5,24 @@
 # Modes:     throughput  (50 steps, no logging)
 #            train       (N steps, with W&B and Tensorboard)
 #
-# Sizes:     125m, 350m, 760m, 1.5b, 3b, 8b
+# Sizes:     125m, 350m, 760m, 1.5b, 3b, 8b, 32b, 140b
 #
 # Steps:     required for train mode (e.g., 1000, 5000, 15000)
 # Nodes:     optional, default 4 (max 8)
 #
-# Examples:  ./launch.sh throughput 760m
-#            ./launch.sh throughput 8b 50 1
-#            ./launch.sh train 760m 5000
-#            ./launch.sh train 1.5b 3000 8
+# Env toggles:
+#   FP8=1                  enable FP8 GEMMs via Transformer Engine (E4M3 fwd / E5M2 bwd)
+#   NSYS=1                 wrap training in nsys profile (writes .nsys-rep into $LOG_DIR)
+#   RECOMPUTE=full|selective|none   override activation recompute (default: full for 32b/140b, none otherwise)
+#   OVERLAP_PARAM_GATHER=0|1        toggle --overlap-param-gather (default 1)
+#   GBS=<int>              override global batch size (default 256)
+#
+# Examples:
+#   ./launch.sh throughput 125m 2 1                  # smoke test, BF16, 2 steps, 1 node
+#   FP8=1 ./launch.sh throughput 125m 2 1            # smoke test, FP8
+#   ./launch.sh throughput 32b 50 1                  # BF16 baseline, 32B, TP=4, single node
+#   FP8=1 ./launch.sh throughput 32b 50 1            # FP8 run, 32B, TP=4, single node
+#   NSYS=1 FP8=1 ./launch.sh throughput 32b 20 1     # FP8 + nsys profile
 
 set -euo pipefail
 
@@ -29,6 +38,9 @@ case $MODE in
         EVAL_INTERVAL=$TRAINING_STEPS
         EVAL_ITERS=0
         LR_WARMUP_ITERS=10
+        if [ "$LR_WARMUP_ITERS" -ge "$TRAINING_STEPS" ]; then
+            LR_WARMUP_ITERS=$(( TRAINING_STEPS - 1 ))
+        fi
         LOGGING_EXTRA=""
         WANDB=false
         ;;
@@ -52,6 +64,8 @@ case $MODE in
 esac
 
 ################ Model config ################
+TP=1
+PP=1
 case $MODEL_SIZE in
     125m)
         NUM_LAYERS=12;  HIDDEN=768;  FFN=2048;  HEADS=12; KV_HEADS=4
@@ -79,19 +93,82 @@ case $MODEL_SIZE in
         ;;
     32b) NUM_LAYERS=64; HIDDEN=6144; FFN=16384; HEADS=48; KV_HEADS=8
         MBS=1
+        TP=4
         ;;
     140b) NUM_LAYERS=112; HIDDEN=10240; FFN=27648; HEADS=80; KV_HEADS=8
         MBS=1
+        TP=4
+        PP=4
         ;;
     *)
-        echo "Unknown model size: $MODEL_SIZE. Choose: 125m, 350m, 760m, 1.5b, 3b, 8b"
+        echo "Unknown model size: $MODEL_SIZE. Choose: 125m, 350m, 760m, 1.5b, 3b, 8b, 32b, 140b"
         exit 1
         ;;
 esac
 
-GBS=256
+SEQ_PARALLEL_ARG=""
+if [ "$TP" -gt 1 ]; then
+    SEQ_PARALLEL_ARG="--sequence-parallel"
+fi
+
+DEFAULT_RECOMPUTE=none
+case $MODEL_SIZE in
+    32b|140b) DEFAULT_RECOMPUTE=full ;;
+esac
+RECOMPUTE=${RECOMPUTE:-$DEFAULT_RECOMPUTE}
+RECOMPUTE_ARG=""
+if [ "$RECOMPUTE" = "full" ]; then
+    RECOMPUTE_ARG="--recompute-granularity full --recompute-method uniform --recompute-num-layers 1"
+elif [ "$RECOMPUTE" = "selective" ]; then
+    RECOMPUTE_ARG="--recompute-granularity selective"
+fi
+
+GPUS_PER_NODE=4
+TOTAL_GPUS=$((NODES * GPUS_PER_NODE))
+NEEDED_GPUS=$((TP * PP))
+if [ "$TOTAL_GPUS" -lt "$NEEDED_GPUS" ]; then
+    echo "Error: model $MODEL_SIZE needs TP=$TP PP=$PP ($NEEDED_GPUS GPUs) but only $TOTAL_GPUS GPUs requested ($NODES nodes x $GPUS_PER_NODE)."
+    exit 1
+fi
+
+GBS=${GBS:-256}
 SEQ_LEN=4096
 JOB_NAME="gipfel-${MODE}-${MODEL_SIZE}-${TRAINING_STEPS}s-${NODES}n"
+
+################ FP8 toggle (Samy / fp8 axis) ################
+# FP8=1 enables Transformer Engine FP8 GEMMs. BF16 stays for non-GEMM ops
+# (activations, optimizer state) — only the matmul path switches to FP8.
+# Format `hybrid` = E4M3 forward / E5M2 backward, the NVIDIA-recommended default.
+FP8=${FP8:-0}
+FP8_ARGS=""
+if [ "$FP8" = "1" ]; then
+    FP8_ARGS="--fp8-format hybrid --fp8-amax-history-len 1024 --fp8-amax-compute-algo max --fp8-margin 0"
+    JOB_NAME="${JOB_NAME}-fp8"
+fi
+
+LIGER=${LIGER:-0}
+if [ "$LIGER" = "1" ]; then
+    USE_LIGER_SWIGLU=${USE_LIGER_SWIGLU:-1}
+    USE_LIGER_ROPE=${USE_LIGER_ROPE:-1}
+    USE_LIGER_RMSNORM=${USE_LIGER_RMSNORM:-1}
+    USE_LIGER_CE=${USE_LIGER_CE:-1}
+fi
+USE_LIGER_SWIGLU=${USE_LIGER_SWIGLU:-0}
+USE_LIGER_ROPE=${USE_LIGER_ROPE:-0}
+USE_LIGER_RMSNORM=${USE_LIGER_RMSNORM:-0}
+USE_LIGER_CE=${USE_LIGER_CE:-0}
+USE_LIGER_FUSED_LINEAR_CE=${USE_LIGER_FUSED_LINEAR_CE:-0}
+
+OVERLAP_PARAM_GATHER=${OVERLAP_PARAM_GATHER:-1}
+if [ "$USE_LIGER_FUSED_LINEAR_CE" = "1" ]; then
+    OVERLAP_PARAM_GATHER=0
+fi
+OVERLAP_PARAM_GATHER_ARG="--overlap-param-gather"
+if [ "$OVERLAP_PARAM_GATHER" = "0" ]; then
+    OVERLAP_PARAM_GATHER_ARG=""
+fi
+
+NSYS=${NSYS:-0}
 
 ################ W&B block ################
 if [ "$WANDB" = true ]; then
@@ -153,6 +230,14 @@ GBS=${GBS}
 SEQ_LEN=${SEQ_LEN}
 TRAINING_STEPS=${TRAINING_STEPS}
 
+# Liger-Kernel kernel selection (forwarded from launcher env)
+export USE_LIGER_SWIGLU=${USE_LIGER_SWIGLU}
+export USE_LIGER_ROPE=${USE_LIGER_ROPE}
+export USE_LIGER_RMSNORM=${USE_LIGER_RMSNORM}
+export USE_LIGER_CE=${USE_LIGER_CE}
+export USE_LIGER_FUSED_LINEAR_CE=${USE_LIGER_FUSED_LINEAR_CE}
+export NSYS=${NSYS}
+
 # Logging
 PROJECT_NAME=gipfelsturm
 EXP_NAME=${MODE}-${MODEL_SIZE}-\${SLURM_NNODES}n
@@ -205,6 +290,11 @@ MODEL
 
 cat >> "$SCRIPT" << TRAINING
 
+PROFILE_ARG=""
+if [ "${NSYS}" = "1" ]; then
+    PROFILE_ARG="--profile"
+fi
+
 TRAINING_ARGS=(
     --micro-batch-size \$MBS
     --global-batch-size \$GBS
@@ -219,6 +309,8 @@ TRAINING_ARGS=(
     --no-check-for-nan-in-loss-and-grad
     --manual-gc
     --manual-gc-interval 50
+    ${RECOMPUTE_ARG}
+    \$PROFILE_ARG
 )
 
 REGULARIZATION_ARGS=(
@@ -244,17 +336,27 @@ INITIALIZATION_ARGS=(
     --init-method-std 0.02
 )
 
+REST
+
+cat >> "$SCRIPT" << MIXED_PRECISION
 MIXED_PRECISION_ARGS=(
     --bf16
+    ${FP8_ARGS}
 )
+MIXED_PRECISION
 
+cat >> "$SCRIPT" << DISTRIBUTED
 DISTRIBUTED_ARGS=(
-    --tensor-model-parallel-size 1
-    --pipeline-model-parallel-size 1
+    --tensor-model-parallel-size ${TP}
+    --pipeline-model-parallel-size ${PP}
+    ${SEQ_PARALLEL_ARG}
     --use-distributed-optimizer
     --overlap-grad-reduce
-    --overlap-param-gather
+    ${OVERLAP_PARAM_GATHER_ARG}
 )
+DISTRIBUTED
+
+cat >> "$SCRIPT" << 'REST'
 
 LOGGING_ARGS=(
     --log-throughput
@@ -290,7 +392,13 @@ TORCHRUN_ARGS=(
     --tee 3
 )
 
-TRAINING_CMD="torchrun ${TORCHRUN_ARGS[@]} $MEGATRON_LM_DIR/pretrain_gpt.py \
+NSYS_PREFIX=""
+if [ "${NSYS:-0}" = "1" ]; then
+    NSYS_OUT=$LOG_DIR/nsys-$EXP_NAME-$SLURM_JOB_ID
+    NSYS_PREFIX="nsys profile --output=$NSYS_OUT --capture-range=cudaProfilerApi --capture-range-end=stop --force-overwrite=true --trace=cuda,nvtx,osrt --sample=none"
+fi
+
+TRAINING_CMD="$NSYS_PREFIX torchrun ${TORCHRUN_ARGS[@]} $MEGATRON_LM_DIR/pretrain_gpt.py \
     ${TRANSFORMER_ENGINE_ARGS[@]} \
     ${NETWORK_SIZE_ARGS[@]} \
     ${TRAINING_ARGS[@]} \
