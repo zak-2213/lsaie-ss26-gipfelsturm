@@ -30,13 +30,10 @@ def main():
         regex_throughput = re.compile(r"throughput per GPU \(TFLOP/s/GPU\): ([\d\.]+)")
         regex_tokens = re.compile(r"tokens/sec/GPU: (\d+)")
         
-        experiment = path.basename(log_file).replace("gipfel-throughput-32b-50s-4n-", "").replace(".log", "")
+        experiment = path.basename(log_file).replace("gipfel-throughput-", "").replace(".log", "")
         
         throughput_per_file[experiment] = [float(group[1]) for line in lines for group in [regex_throughput.search(line)] if group]
         tokens_per_file[experiment] = [int(group[1]) for line in lines for group in [regex_tokens.search(line)] if group]
-    
-    print("Throughput numbers:", throughput_per_file)
-    print("Tokens per second numbers:", tokens_per_file)
     
     fig, axs = plt.subplots(2, 1, figsize=(10, 5))
     
@@ -65,6 +62,7 @@ def main():
     # ============
     
     for experiment, throughputs in throughput_per_file.items():
+        print(f"{experiment}: Mean Throughput = {np.mean(throughputs):.2f} TFLOP/s/GPU, Std Dev = {np.std(throughputs):.2f}")
         axs[0].bar(experiment, np.mean(throughputs), yerr=np.std(throughputs), capsize=5)
     
     axs[0].set_title("Average Throughput per GPU (TFLOP/s/GPU)")
@@ -72,6 +70,7 @@ def main():
     axs[0].set_xticks(range(len(throughput_per_file.keys())), labels=throughput_per_file.keys())
     
     for experiment, tokens in tokens_per_file.items():
+        print(f"{experiment}: Mean Tokens/sec/GPU = {np.mean(tokens):.2f}, Std Dev = {np.std(tokens):.2f}")
         axs[1].bar(experiment, np.mean(tokens), yerr=np.std(tokens), capsize=5)
 
     axs[1].set_title("Average Tokens per second per GPU")
@@ -80,7 +79,7 @@ def main():
     
     # Store plot
     plt.tight_layout()
-    date = datetime.now().strftime("%Y-%m- %d_%H-%M-%S")
+    date = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     plt.savefig(f"plots/throughput_tokens_{date}.png")
     print(f"Plot saved as 'plots/throughput_tokens_{date}.png'")
 

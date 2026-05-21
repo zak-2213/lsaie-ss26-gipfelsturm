@@ -18,7 +18,7 @@
 set -euo pipefail
 
 usage() {
-    echo "Usage: $0 <mode> <model_size> [--steps=<steps>] [--nodes=<nodes>] [--time=<time>] [--environment=<env>] [-d]"
+    echo "Usage: $0 <mode> <model_size> [--steps=<steps>] [--nodes=<nodes>] [--time=<time>] [--method=<method>] [--sequence-length=<seq_len>] [-d]"
     exit 1
 }
 
@@ -27,21 +27,23 @@ MODE=${1}
 MODEL_SIZE=${2}
 shift 2
 
-PARSED=$(getopt -o d --long steps:,nodes:,time:,environment: --name "$0" -- "$@") || usage
+PARSED=$(getopt -o d --long steps:,nodes:,time:,method:,sequence-length: --name "$0" -- "$@") || usage
 eval set -- "$PARSED"
 
 STEPS=""
 NODES=""
 TIME=""
 DRY_RUN=false
-ENVIRONMENT="alps3"
+METHOD="fused"
+SEQ_LEN=4096
 
 while true; do
     case "$1" in
         --steps)  STEPS="$2";  shift 2 ;;
         --nodes)  NODES="$2";  shift 2 ;;
         --time)   TIME="$2";   shift 2 ;;
-        --environment)  ENVIRONMENT="$2";  shift 2 ;;
+        --method)  METHOD="$2";  shift 2 ;;
+        --sequence-length) SEQ_LEN="$2"; shift 2 ;;
         -d)       DRY_RUN=true;  shift ;;
         --)       shift; break         ;;
         *)        usage                ;;
@@ -79,13 +81,31 @@ case $MODE in
         ;;
 esac
 
+ENVIRONMENT="alps3"
+ATTN_BACKEND="AttnBackend.auto"
+case $METHOD in
+    fused)
+        ENVIRONMENT="alps3"
+        ATTN_BACKEND="AttnBackend.fused"
+        ;;
+    flash)
+        ENVIRONMENT=$(realpath ./flashattn3.toml)
+        ATTN_BACKEND="AttnBackend.flash"
+        ;;
+    *)
+        echo "Unknown method: $METHOD. Choose: fused, flash"
+        exit 1
+        ;;
+esac
+
 echo "Mode: $MODE"
 echo "Model size: $MODEL_SIZE"
 echo "Training steps: $TRAINING_STEPS"
 echo "Nodes: $NODES"
 echo "Time: $TIME"
-ENV_NAME=$(basename $ENVIRONMENT)
-echo "Environment: $ENVIRONMENT (${ENV_NAME%.*})"
+echo "Sequence length: $SEQ_LEN"
+echo "Attention backend: $ATTN_BACKEND"
+echo "Environment: $ENVIRONMENT"
 
 ################ Model config ################
 case $MODEL_SIZE in
@@ -126,8 +146,8 @@ case $MODEL_SIZE in
 esac
 
 GBS=256
-SEQ_LEN=4096
-JOB_NAME="gipfel-${MODE}-${MODEL_SIZE}-${TRAINING_STEPS}s-${NODES}n-${ENV_NAME%.*}"
+# SEQ_LEN=4096
+JOB_NAME="gipfel-${MODE}-${MODEL_SIZE}-${TRAINING_STEPS}s-${NODES}n-${SEQ_LEN}sl-${METHOD}"
 
 ################ W&B block ################
 if [ "$WANDB" = true ]; then
@@ -188,6 +208,7 @@ MBS=${MBS}
 GBS=${GBS}
 SEQ_LEN=${SEQ_LEN}
 TRAINING_STEPS=${TRAINING_STEPS}
+ATTN_BACKEND=${ATTN_BACKEND}
 
 # Logging
 PROJECT_NAME=gipfelsturm
@@ -218,6 +239,7 @@ TRANSFORMER_ENGINE_ARGS=(
     --transformer-impl transformer_engine
     --use-precision-aware-optimizer
     --main-grads-dtype bf16
+    --attn-backend ${ATTN_BACKEND}
 )
 
 SETUP
