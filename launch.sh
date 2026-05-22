@@ -16,6 +16,7 @@
 #   RECOMPUTE=full|selective|none   override activation recompute (default: full for 32b/140b, none otherwise)
 #   OVERLAP_PARAM_GATHER=0|1        toggle --overlap-param-gather (default 1)
 #   GBS=<int>              override global batch size (default 256)
+#   TIME_LIMIT=HH:MM:SS    override SLURM time limit (default depends on mode and model size)
 #
 # Examples:
 #   ./launch.sh throughput 125m 2 1                  # smoke test, BF16, 2 steps, 1 node
@@ -120,6 +121,12 @@ case $MODEL_SIZE in
         fi
         ;;
 esac
+
+# Allow user to override SLURM time limit, e.g. for tighter scheduling:
+#   TIME_LIMIT=01:00:00 ./launch.sh throughput 32b 20 1
+if [ -n "${TIME_LIMIT:-}" ]; then
+    TIME="$TIME_LIMIT"
+fi
 
 DEFAULT_RECOMPUTE=none
 case $MODEL_SIZE in
