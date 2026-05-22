@@ -111,6 +111,16 @@ if [ "$TP" -gt 1 ]; then
     SEQ_PARALLEL_ARG="--sequence-parallel"
 fi
 
+# 32B/140B iter time is ~145s under BF16+TP=4+full-recompute, so 50 iters need ~2h.
+# The default 30-min cap (used for smaller models) cuts these runs at iter ~11.
+case $MODEL_SIZE in
+    32b|140b)
+        if [ "$MODE" = "throughput" ]; then
+            TIME=02:30:00
+        fi
+        ;;
+esac
+
 DEFAULT_RECOMPUTE=none
 case $MODEL_SIZE in
     32b|140b) DEFAULT_RECOMPUTE=full ;;
@@ -257,6 +267,10 @@ export PYTHONPATH=$MEGATRON_LM_DIR:$PYTHONPATH
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 export TORCH_NCCL_AVOID_RECORD_STREAMS=1
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
+# Reduce CUDA allocator fragmentation. Critical for 32B FP8: BF16 peaks at
+# ~87 GB/96 GB and FP8's TE state pushes it past 95 GB at FusedAdam init
+# without expandable_segments. Recommended by the PyTorch OOM message.
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export TRITON_CACHE_DIR=/iopsstor/scratch/cscs/$USER/gipfelsturm/.triton_cache
 export TORCHINDUCTOR_CACHE_DIR=/iopsstor/scratch/cscs/$USER/gipfelsturm/.inductor_cache
 export OMP_NUM_THREADS=$((SLURM_CPUS_PER_TASK/SLURM_GPUS_PER_NODE))
