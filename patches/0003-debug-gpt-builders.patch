@@ -1,0 +1,20 @@
+diff --git a/gpt_builders.py b/gpt_builders.py
+index dfe41f7b8..aca94859f 100644
+--- a/gpt_builders.py
++++ b/gpt_builders.py
+@@ -42,6 +42,7 @@ def gpt_builder(args, pre_process, post_process, vp_stage=None, config=None, pg_
+         )
+     else:  # using core models
+         if args.spec is not None:
++            print(f"[fa3_spec] Using custom spec: {args.spec}", flush=True)
+             transformer_layer_spec = import_module(args.spec)
+         else:
+             use_te = args.transformer_impl == "transformer_engine"
+@@ -92,6 +93,7 @@ def gpt_builder(args, pre_process, post_process, vp_stage=None, config=None, pg_
+                 vp_stage=vp_stage,
+             )
+ 
++        print(f"[fa3_spec] Got transformer layer spec: {transformer_layer_spec}", flush=True)
+         model = GPTModel(
+             config=config,
+             transformer_layer_spec=transformer_layer_spec,

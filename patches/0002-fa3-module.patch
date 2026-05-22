@@ -1,0 +1,271 @@
+diff --git a/megatron/fa3/fa3_dot_product_attention.py b/megatron/fa3/fa3_dot_product_attention.py
+new file mode 100644
+index 000000000..e61018e45
+--- /dev/null
++++ b/megatron/fa3/fa3_dot_product_attention.py
+@@ -0,0 +1,203 @@
++# megatron/core/transformer/fa3_dot_product_attention.py
++#
++# FA3 core-attention kernel conforming to the CoreAttention / CoreAttentionBuilder
++# protocols defined in megatron/core/transformer/attention.py (main, 2025).
++#
++# The real attention.py already imports flash_attn_3 at the top of the file and
++# exposes HAVE_FA3.  This module slots into the spec system as the core_attention
++# submodule without touching any Megatron internals.
++#
++# Requirements:
++#   pip install flash-attn-3   (the flash_attn_3 package, distinct from flash-attn)
++#   — or —
++#   pip install flashattn-hopper   (older Hopper-only wheel)
++#   Megatron-LM main (2025), GH200 (sm90a)
++
++from __future__ import annotations
++
++import math
++from typing import Optional
++
++import torch
++from torch import Tensor
++
++from megatron.core.process_groups_config import ProcessGroupCollection
++from megatron.core.transformer.enums import AttnMaskType
++from megatron.core.transformer.module import MegatronModule
++from megatron.core.transformer.transformer_config import TransformerConfig
++from megatron.core.packed_seq_params import PackedSeqParams
++
++# ── FA3 import (mirrors what attention.py does) ───────────────────────────────
++try:
++    from flash_attn_3.flash_attn_interface import flash_attn_func, flash_attn_varlen_func
++    HAVE_FA3 = True
++except ImportError:
++    HAVE_FA3 = False
++
++if not HAVE_FA3:
++    try:
++        from flashattn_hopper.flash_attn_interface import (
++            flash_attn_func,
++            flash_attn_varlen_func,
++        )
++        HAVE_FA3 = True
++    except ImportError:
++        pass
++
++if not HAVE_FA3:
++    raise ImportError(
++        "FA3DotProductAttention requires flash_attn_3 or flashattn_hopper.\n"
++        "Install with:  pip install flash-attn-3\n"
++        "GH200 (sm90a) is required for the Hopper CUTLASS kernel."
++    )
++
++
++class FA3DotProductAttention(MegatronModule):
++    """
++    Core attention using FlashAttention-3 (GH200 / sm90a Hopper kernel).
++
++    Conforms to the CoreAttention + CoreAttentionBuilder protocols in
++    megatron/core/transformer/attention.py so it can be used directly in a
++    SelfAttentionSubmodules spec.
++
++    The constructor signature matches CoreAttentionBuilder.__call__:
++        config, layer_number, attn_mask_type, attention_type,
++        cp_comm_type, softmax_scale, pg_collection
++
++    The forward signature matches CoreAttention.forward:
++        query, key, value, attention_mask, *,
++        attn_mask_type, attention_bias, packed_seq_params
++    """
++
++    def __init__(
++        self,
++        *,
++        config: TransformerConfig,
++        layer_number: int,
++        attn_mask_type: AttnMaskType = AttnMaskType.causal,
++        attention_type: str = "self",
++        cp_comm_type: Optional[str] = None,
++        softmax_scale: Optional[float] = None,
++        pg_collection: Optional[ProcessGroupCollection] = None,
++    ):
++        super().__init__(config=config)
++
++        self.config = config
++        self.layer_number = layer_number
++        self.attn_mask_type = attn_mask_type
++
++        # cp_comm_type / pg_collection: FA3 doesn't implement context parallelism
++        # itself; if CP is enabled the caller (SelfAttention) must handle ring-attn
++        # sharding before reaching this module.
++        if cp_comm_type is not None and cp_comm_type != "p2p":
++            raise ValueError(
++                f"FA3DotProductAttention does not support cp_comm_type={cp_comm_type!r}. "
++                "Use TEDotProductAttention for all-to-all CP."
++            )
++
++        # ── softmax scale ────────────────────────────────────────────────────
++        if softmax_scale is not None:
++            self.softmax_scale = softmax_scale
++        else:
++            head_dim = config.kv_channels or (
++                config.hidden_size // config.num_attention_heads
++            )
++            self.softmax_scale = 1.0 / math.sqrt(head_dim)
++
++        # ── dropout ──────────────────────────────────────────────────────────
++        self.attention_dropout = config.attention_dropout
++
++        # ── causal flag ──────────────────────────────────────────────────────
++        self.is_causal = (attn_mask_type == AttnMaskType.causal)
++
++    # ── layout helpers ────────────────────────────────────────────────────────
++
++    @staticmethod
++    def _megatron_to_fa(x: Tensor) -> Tensor:
++        """[s, b, h, d] → [b, s, h, d]  (FA3 is batch-first)."""
++        return x.permute(1, 0, 2, 3).contiguous()
++
++    @staticmethod
++    def _fa_to_megatron(x: Tensor) -> Tensor:
++        """[b, s, h, d] → [s, b, h, d]  (Megatron is seq-first)."""
++        return x.permute(1, 0, 2, 3).contiguous()
++
++    # ── forward ───────────────────────────────────────────────────────────────
++
++    def forward(
++        self,
++        query: Tensor,                          # [s, b, np, hn]
++        key: Tensor,                            # [s, b, ng, hn]
++        value: Tensor,                          # [s, b, ng, hn]
++        attention_mask: Optional[Tensor],       # unused for causal FA3
++        *,
++        attn_mask_type: AttnMaskType = None,
++        attention_bias: Optional[Tensor] = None,
++        packed_seq_params: Optional[PackedSeqParams] = None,
++    ) -> Tensor:                                # [s, b, np, hn]
++        """
++        Two dispatch paths:
++
++        1. Packed / variable-length  (packed_seq_params is not None)
++           Tensors arrive as [total_tokens, h, d]; use flash_attn_varlen_func.
++
++        2. Padded / standard  (packed_seq_params is None)
++           Tensors arrive as [s, b, h, d]; permute and use flash_attn_func.
++        """
++        if attention_bias is not None:
++            raise ValueError(
++                "FA3DotProductAttention does not support attention_bias. "
++                "Use TEDotProductAttention if you need ALiBi / relative bias."
++            )
++
++        dropout_p = self.attention_dropout if self.training else 0.0
++
++        # Resolve per-call causal flag (caller may override at decode time)
++        if attn_mask_type is not None:
++            is_causal = (attn_mask_type == AttnMaskType.causal)
++        else:
++            is_causal = self.is_causal
++
++        # ── packed path ───────────────────────────────────────────────────────
++        if packed_seq_params is not None:
++            # packed_seq_params carries cu_seqlens_{q,kv} and max_seqlen_{q,kv}.
++            # Tensors are already [total_tokens, h, d] from the caller.
++            cu_seqlens_q  = packed_seq_params.cu_seqlens_q
++            cu_seqlens_kv = packed_seq_params.cu_seqlens_kv
++            max_seqlen_q  = packed_seq_params.max_seqlen_q
++            max_seqlen_kv = packed_seq_params.max_seqlen_kv
++
++            out = flash_attn_varlen_func(
++                q=query,
++                k=key,
++                v=value,
++                cu_seqlens_q=cu_seqlens_q,
++                cu_seqlens_k=cu_seqlens_kv,
++                max_seqlen_q=max_seqlen_q,
++                max_seqlen_k=max_seqlen_kv,
++                dropout_p=dropout_p,
++                softmax_scale=self.softmax_scale,
++                causal=is_causal,
++            )
++            # out: [total_tokens, np, hn] → [total_tokens, np*hn]
++            total_tokens, np, hn = out.shape
++            return out.reshape(total_tokens, np * hn)
++
++        # ── padded path ───────────────────────────────────────────────────────
++        q = self._megatron_to_fa(query)   # [b, s, np, hn]
++        k = self._megatron_to_fa(key)     # [b, s, ng, hn]
++        v = self._megatron_to_fa(value)   # [b, s, ng, hn]
++
++        out = flash_attn_func(
++            q=q,
++            k=k,
++            v=v,
++            # dropout_p=dropout_p, # must be 0.0 because it's not supported in FA3
++            softmax_scale=self.softmax_scale,
++            causal=is_causal,
++        )
++        # out: [b, s, np, hn] → [s, b, np, hn] → [s*b, np*hn]
++        # TERowParallelLinear (linear_proj) requires a 2D input with heads merged.
++        s, b, np, hn = query.shape
++        out = self._fa_to_megatron(out)   # [s, b, np, hn]
++        return out.reshape(s * b, np * hn)
+diff --git a/megatron/fa3/gpt_layer_spec_fa3.py b/megatron/fa3/gpt_layer_spec_fa3.py
+new file mode 100644
+index 000000000..e358d08c0
+--- /dev/null
++++ b/megatron/fa3/gpt_layer_spec_fa3.py
+@@ -0,0 +1,56 @@
++# examples/gpt_layer_spec_fa3.py
++#
++# Custom layer spec for GPT pretraining that swaps core_attention to
++# FA3DotProductAttention while reusing every other submodule from the
++# standard local (non-TE) spec in gpt_layer_specs.py.
++#
++# Usage — pass to pretrain_gpt.py via --spec:
++#
++#   torchrun ... pretrain_gpt.py \
++#       --use-mcore-models \
++#       --transformer-impl local \
++#       --spec examples.gpt_layer_spec_fa3.get_gpt_layer_fa3_spec \
++#       ...
++#
++# import_module() (called by model_provider) imports the dotted path and
++# calls the function with no arguments, so the function must return a
++# ModuleSpec directly.
++
++from megatron.core.models.gpt.gpt_layer_specs import get_gpt_layer_with_transformer_engine_spec
++from megatron.core.transformer.spec_utils import ModuleSpec
++from megatron.core.transformer.attention import SelfAttention, SelfAttentionSubmodules
++from megatron.training import get_args
++
++# FA3 kernel — place this file next to fa3_dot_product_attention.py
++# (or adjust the import path to wherever you put it in your repo).
++from megatron.fa3.fa3_dot_product_attention import FA3DotProductAttention
++
++"""
++Return a TransformerLayer ModuleSpec identical to get_gpt_layer_local_spec()
++except that core_attention is replaced with FA3DotProductAttention.
++
++Strategy:
++    1. Fetch the canonical local spec (no TransformerEngine dependency).
++    2. Reach into the self_attention submodules and swap core_attention in place.
++        This preserves every other submodule (linear_qkv, linear_proj,
++        q_layernorm, k_layernorm, pre/post norms, MLP, BDA functions, …)
++        exactly as Megatron configures them for GPT.
++"""
++print(f"[fa3_spec] Build GPT Layer spec")
++args = get_args()
++get_gpt_layer_fa3_spec = get_gpt_layer_with_transformer_engine_spec(
++    args.num_experts,
++    args.moe_grouped_gemm,
++    args.qk_layernorm,
++    args.multi_latent_attention,
++    args.experimental_attention_variant,
++    moe_use_legacy_grouped_gemm=args.moe_use_legacy_grouped_gemm,
++    qk_l2_norm=args.qk_l2_norm,
++)
++print(f"[fa3_spec] spec={get_gpt_layer_fa3_spec}", flush=True)
++
++# get_gpt_layer_local_spec() returns a ModuleSpec whose submodules field
++# is a TransformerLayerSubmodules dataclass.  self_attention is itself a
++# ModuleSpec(module=SelfAttention, submodules=SelfAttentionSubmodules(...)).
++# SelfAttentionSubmodules is a plain dataclass — mutate core_attention.
++get_gpt_layer_fa3_spec.submodules.self_attention.submodules.core_attention = FA3DotProductAttention

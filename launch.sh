@@ -18,7 +18,7 @@
 set -euo pipefail
 
 usage() {
-    echo "Usage: $0 <mode> <model_size> [--steps=<steps>] [--nodes=<nodes>] [--time=<time>] [--method=<method>] [--sequence-length=<seq_len>] [-d]"
+    echo "Usage: $0 <mode> <model_size> [--steps=<steps>] [--nodes=<nodes>] [--time=<time>] [--method=<method>] [--sequence-length=<seq_len>] [--mail-to=<mail_address>] [-d]"
     exit 1
 }
 
@@ -27,7 +27,7 @@ MODE=${1}
 MODEL_SIZE=${2}
 shift 2
 
-PARSED=$(getopt -o d --long steps:,nodes:,time:,method:,sequence-length: --name "$0" -- "$@") || usage
+PARSED=$(getopt -o d --long steps:,nodes:,time:,method:,sequence-length:,mail-to: --name "$0" -- "$@") || usage
 eval set -- "$PARSED"
 
 STEPS=""
@@ -36,6 +36,7 @@ TIME=""
 DRY_RUN=false
 METHOD="fused"
 SEQ_LEN=4096
+SEND_MAIL_TO=""
 
 while true; do
     case "$1" in
@@ -44,6 +45,7 @@ while true; do
         --time)   TIME="$2";   shift 2 ;;
         --method)  METHOD="$2";  shift 2 ;;
         --sequence-length) SEQ_LEN="$2"; shift 2 ;;
+        --mail-to) SEND_MAIL_TO="$2"; shift 2 ;;
         -d)       DRY_RUN=true;  shift ;;
         --)       shift; break         ;;
         *)        usage                ;;
@@ -83,14 +85,22 @@ esac
 
 ENVIRONMENT="alps3"
 ATTN_BACKEND="AttnBackend.auto"
+TRANSFORMER_IMPL="transformer_engine"
+SPEC=""
 case $METHOD in
     fused)
         ENVIRONMENT="alps3"
         ATTN_BACKEND="AttnBackend.fused"
+        TRANSFORMER_IMPL="transformer_engine"
         ;;
     flash)
         ENVIRONMENT=$(realpath ./flashattn3.toml)
-        ATTN_BACKEND="AttnBackend.flash"
+        # ATTN_BACKEND="AttnBackend.flash"
+        ATTN_BACKEND="flash" # Job ID: 2332087
+        # ATTN_BACKEND="1"       # Job ID: 2332092
+        # TRANSFORMER_IMPL="local"
+        TRANSFORMER_IMPL="transformer_engine"
+        SPEC="megatron.fa3.gpt_layer_spec_fa3 get_gpt_layer_fa3_spec"
         ;;
     *)
         echo "Unknown method: $METHOD. Choose: fused, flash"
@@ -106,6 +116,7 @@ echo "Time: $TIME"
 echo "Sequence length: $SEQ_LEN"
 echo "Attention backend: $ATTN_BACKEND"
 echo "Environment: $ENVIRONMENT"
+echo "Send mail to: ${SEND_MAIL_TO:-"none"}"
 
 ################ Model config ################
 case $MODEL_SIZE in
@@ -188,7 +199,15 @@ cat >> "$SCRIPT" << SBATCH_DIRECTIVES
 #SBATCH --cpus-per-task=288
 #SBATCH --mem=460000
 #SBATCH --no-requeue
+#SBATCH -p debug
 SBATCH_DIRECTIVES
+
+if [ -n $SEND_MAIL_TO ]; then
+    cat >> "$SCRIPT" << MAIL
+#SBATCH --mail-type=END,FAIL
+#SBATCH --mail-user=$SEND_MAIL_TO
+MAIL
+fi
 
 cat >> "$SCRIPT" << 'BODY'
 
@@ -209,6 +228,8 @@ GBS=${GBS}
 SEQ_LEN=${SEQ_LEN}
 TRAINING_STEPS=${TRAINING_STEPS}
 ATTN_BACKEND=${ATTN_BACKEND}
+TRANSFORMER_IMPL=${TRANSFORMER_IMPL}
+SPEC="${SPEC}"
 
 # Logging
 PROJECT_NAME=gipfelsturm
@@ -224,7 +245,7 @@ cat >> "$SCRIPT" << 'SETUP'
 mkdir -p logs $LOG_DIR $TENSORBOARD_DIR $DATASET_CACHE_DIR
 
 cd $MEGATRON_LM_DIR
-flock $MEGATRON_LM_DIR/.git-lock bash -c "cd $MEGATRON_LM_DIR && git checkout -- . && git apply $WORKDIR/patches/*.patch"
+flock $MEGATRON_LM_DIR/.git-lock bash -c "cd $MEGATRON_LM_DIR && rm -rf $MEGATRON_LM_DIR/megatron/fa3 && git checkout -- . && git apply $WORKDIR/patches/*.patch"
 export PYTHONPATH=$MEGATRON_LM_DIR:$PYTHONPATH
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 export TORCH_NCCL_AVOID_RECORD_STREAMS=1
@@ -236,11 +257,19 @@ MASTER_ADDR=$(hostname)
 MASTER_PORT=25678
 
 TRANSFORMER_ENGINE_ARGS=(
-    --transformer-impl transformer_engine
+    --transformer-impl ${TRANSFORMER_IMPL}
     --use-precision-aware-optimizer
     --main-grads-dtype bf16
-    --attn-backend ${ATTN_BACKEND}
+    --attention-backend ${ATTN_BACKEND}
 )
+
+if [ -n "$SPEC" ]; then
+    TRANSFORMER_ENGINE_ARGS+=("--spec $SPEC")
+fi
+
+# if [ $TRANSFORMER_IMPL == "flash" ]; then
+#     TRANSFORMER_ENGINE_ARGS+=("--no-persist-layer-norm")
+# fi
 
 SETUP
 
