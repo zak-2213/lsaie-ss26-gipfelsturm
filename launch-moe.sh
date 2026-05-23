@@ -25,7 +25,7 @@ case $MODE in
     throughput)
         TRAINING_STEPS=${3:-50}
         NODES=${4:-4}
-        TIME=00:30:00
+        TIME=01:00:00
         EVAL_INTERVAL=$TRAINING_STEPS
         EVAL_ITERS=0
         LR_WARMUP_ITERS=10
@@ -79,16 +79,16 @@ case $MODEL_SIZE in
         ;;
     32b)
         NUM_LAYERS=64; HIDDEN=6144; FFN=1024;  HEADS=48; KV_HEADS=8
-        NUM_EXPERTS=16; MOE_TOPK=1; EP=1; TP=4; PP=1; MBS=1
+        NUM_EXPERTS=16; MOE_TOPK=1; EP=16; TP=1; PP=1; MBS=1
         ;;
     140b)
-        NUM_LAYERS=112; HIDDEN=10240; FFN=1728; HEADS=80; KV_HEADS=8
-        NUM_EXPERTS=16; MOE_TOPK=1; EP=1; TP=4; PP=4; MBS=1
+        NUM_LAYERS=112; HIDDEN=10240; FFN=864; HEADS=80; KV_HEADS=8
+        NUM_EXPERTS=32; MOE_TOPK=1; EP=1; TP=4; PP=4; MBS=1
         ;;
 esac
 
 GBS=256
-SEQ_LEN=4096
+SEQ_LEN=8192
 JOB_NAME="gipfel-moe-${MODE}-${MODEL_SIZE}-${TRAINING_STEPS}s-${NODES}n"
 
 ################ W&B block ################
@@ -192,7 +192,6 @@ NETWORK_SIZE_ARGS=(
     --num-attention-heads ${HEADS}
     --group-query-attention
     --num-query-groups ${KV_HEADS}
-    --num-experts ${NUM_EXPERTS}
     --max-position-embeddings \$SEQ_LEN
     --position-embedding-type rope
     --normalization RMSNorm
@@ -203,6 +202,7 @@ NETWORK_SIZE_ARGS=(
 )
 
 MOE_ARGS=(
+    --num-experts ${NUM_EXPERTS}
     --moe-router-fusion
     --moe-router-type switch
     --moe-expert-capacity-factor 1.5
@@ -210,7 +210,8 @@ MOE_ARGS=(
     --moe-router-enable-expert-bias
     --moe-router-topk ${MOE_TOPK}
     --expert-model-parallel-size ${EP}
-    # --overlap-moe-expert-parallel-comm    # only needed when using EP
+    # --overlap-moe-expert-parallel-comm    # only needed when using EP (not recommended with TP)
+    --moe-token-dispatcher-type alltoall
 )
 MODEL
 

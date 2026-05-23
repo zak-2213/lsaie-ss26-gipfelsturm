@@ -25,7 +25,7 @@ case $MODE in
     throughput)
         TRAINING_STEPS=${3:-50}
         NODES=${4:-4}
-        TIME=00:30:00
+        TIME=01:00:00
         EVAL_INTERVAL=$TRAINING_STEPS
         EVAL_ITERS=0
         LR_WARMUP_ITERS=10
@@ -35,7 +35,7 @@ case $MODE in
     train)
         TRAINING_STEPS=${3:?Usage: ./launch.sh train <model_size> <steps> [nodes]}
         NODES=${4:-4}
-        TIME=02:30:00
+        TIME=01:00:00
         EVAL_INTERVAL=1000
         EVAL_ITERS=10
         LR_WARMUP_ITERS=200
@@ -90,7 +90,7 @@ case $MODEL_SIZE in
 esac
 
 GBS=256
-SEQ_LEN=4096
+SEQ_LEN=8192
 JOB_NAME="gipfel-${MODE}-${MODEL_SIZE}-${TRAINING_STEPS}s-${NODES}n"
 
 ################ W&B block ################
