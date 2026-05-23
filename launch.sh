@@ -13,8 +13,9 @@
 # Env toggles:
 #   FP8=1                  enable FP8 GEMMs via Transformer Engine (E4M3 fwd / E5M2 bwd)
 #   NSYS=1                 wrap training in nsys profile (writes .nsys-rep into $LOG_DIR)
+#   PAOPT=0                drop --use-precision-aware-optimizer (fallback if FP8 OOMs at FusedAdam init)
 #   RECOMPUTE=full|selective|none   override activation recompute (default: full for 32b/140b, none otherwise)
-#   OVERLAP_PARAM_GATHER=0|1        toggle --overlap-param-gather (default 1)
+#   OVERLAP_PARAM_GATHER=0|1        toggle --overlap-param-gather (default 1; auto-0 when FP8=1)
 #   GBS=<int>              override global batch size (default 256)
 #   TIME_LIMIT=HH:MM:SS    override SLURM time limit (default depends on mode and model size)
 #
@@ -195,6 +196,21 @@ fi
 
 NSYS=${NSYS:-0}
 
+# PAOPT=0 fallback: drop --use-precision-aware-optimizer and --main-grads-dtype bf16.
+# This bypasses TE FusedAdam (which allocates int16 remainder buffers for every
+# param upfront in initialize_state — the OOM site for 32B FP8 on a single GH200).
+# Stock Megatron AdamW allocates state lazily on the first backward, so it never
+# tries to allocate all optimizer state before iter 1.
+# Use this only if the standard FP8 path OOMs. Note: dropping PAOPT changes the
+# optimizer config, so the corresponding BF16 baseline should also use PAOPT=0
+# for an apples-to-apples comparison.
+PAOPT=${PAOPT:-1}
+PAOPT_ARGS="--use-precision-aware-optimizer --main-grads-dtype bf16"
+if [ "$PAOPT" = "0" ]; then
+    PAOPT_ARGS=""
+    JOB_NAME="${JOB_NAME}-no-paopt"
+fi
+
 ################ W&B block ################
 if [ "$WANDB" = true ]; then
     WANDB_BLOCK='
@@ -292,11 +308,16 @@ export OMP_NUM_THREADS=$((SLURM_CPUS_PER_TASK/SLURM_GPUS_PER_NODE))
 MASTER_ADDR=$(hostname)
 MASTER_PORT=25678
 
+SETUP
+
+cat >> "$SCRIPT" << TE_ARGS
 TRANSFORMER_ENGINE_ARGS=(
     --transformer-impl transformer_engine
-    --use-precision-aware-optimizer
-    --main-grads-dtype bf16
+    ${PAOPT_ARGS}
 )
+TE_ARGS
+
+cat >> "$SCRIPT" << 'SETUP'
 
 SETUP
 
