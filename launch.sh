@@ -159,15 +159,18 @@ JOB_NAME="gipfel-${MODE}-${MODEL_SIZE}-${TRAINING_STEPS}s-${NODES}n"
 # Format `hybrid` = E4M3 forward / E5M2 backward, the NVIDIA-recommended default.
 #
 # Memory mitigations for 32B FP8 (BF16 peaks at 87/96 GB; TE FP8 adds ~5 GB):
-#   --fp8-param-gather       all-gather params in FP8 instead of BF16 during the
-#                            distributed-optimizer step, saves the all-gather buffer
 #   OVERLAP_PARAM_GATHER=0   skips the extra param-gather buffer (~500 MB)
-# Both are auto-applied when FP8=1 unless the user overrides them.
+# Auto-applied when FP8=1 unless the user overrides it.
+# Note: --fp8-param-gather was tried and is INCOMPATIBLE with
+# --use-precision-aware-optimizer in Megatron 0.16.1. TE's FP8 Adam kernel
+# asserts master params must be FP32, but the precision-aware optimizer stores
+# them as int16 remainders + BF16. Don't re-add this flag without dropping
+# --use-precision-aware-optimizer too — and PAOPT=0 was tested and OOMs worse.
 FP8=${FP8:-0}
 FP8_ARGS=""
 FP8_DEFAULT_OVERLAP=1
 if [ "$FP8" = "1" ]; then
-    FP8_ARGS="--fp8-format hybrid --fp8-amax-history-len 1024 --fp8-amax-compute-algo max --fp8-margin 0 --fp8-param-gather"
+    FP8_ARGS="--fp8-format hybrid --fp8-amax-history-len 1024 --fp8-amax-compute-algo max --fp8-margin 0"
     JOB_NAME="${JOB_NAME}-fp8"
     FP8_DEFAULT_OVERLAP=0   # save ~500 MB by default for FP8 32B runs
 fi
