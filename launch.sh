@@ -25,7 +25,7 @@ case $MODE in
     throughput)
         TRAINING_STEPS=${3:-50}
         NODES=${4:-4}
-        TIME=00:30:00
+        TIME=${TIME:-00:30:00}
         EVAL_INTERVAL=$TRAINING_STEPS
         EVAL_ITERS=0
         LR_WARMUP_ITERS=10
@@ -38,7 +38,7 @@ case $MODE in
     train)
         TRAINING_STEPS=${3:?Usage: ./launch.sh train <model_size> <steps> [nodes]}
         NODES=${4:-4}
-        TIME=02:30:00
+        TIME=${TIME:-02:30:00}
         EVAL_INTERVAL=1000
         EVAL_ITERS=10
         LR_WARMUP_ITERS=200
@@ -97,8 +97,13 @@ case $MODEL_SIZE in
         ;;
 esac
 
-SEQ_PARALLEL_ARG=""
+DEFAULT_SEQ_PARALLEL=0
 if [ "$TP" -gt 1 ]; then
+    DEFAULT_SEQ_PARALLEL=1
+fi
+SEQ_PARALLEL=${SEQ_PARALLEL:-$DEFAULT_SEQ_PARALLEL}
+SEQ_PARALLEL_ARG=""
+if [ "$SEQ_PARALLEL" = "1" ]; then
     SEQ_PARALLEL_ARG="--sequence-parallel"
 fi
 
@@ -123,7 +128,7 @@ if [ "$TOTAL_GPUS" -lt "$NEEDED_GPUS" ]; then
 fi
 
 GBS=${GBS:-256}
-SEQ_LEN=4096
+SEQ_LEN=${SEQ_LEN:-4096}
 JOB_NAME="gipfel-${MODE}-${MODEL_SIZE}-${TRAINING_STEPS}s-${NODES}n"
 
 LIGER=${LIGER:-0}
