@@ -2,7 +2,9 @@
 # image = "/iopsstor/scratch/cscs/course_00220/flashattn3_20260518_101554.sqsh"
 # image = "/iopsstor/scratch/cscs/course_00220/flashattn3_torch_custom.sqsh"
 # image = "/iopsstor/scratch/cscs/course_00220/flashattn3_20260519_082239.sqsh"
-image = "/iopsstor/scratch/cscs/course_00220/flashattn3_20260519_090828.sqsh"
+# image = "/iopsstor/scratch/cscs/course_00220/flashattn3_20260519_090828.sqsh" # built with flash_attn_3 restructured
+# image = "/iopsstor/scratch/cscs/course_00220/flashattn3_20260523_092418.sqsh" # built with original flash_attn_3
+image = "/iopsstor/scratch/cscs/course_00220/flashattn3_20260523_101731.sqsh" # built with original flash_attn_3, adjusted after installation like in trasnformer_engine test
 mounts = ["/capstor:/capstor", "/users:/users", "/iopsstor:/iopsstor"]
 # workdir = "/users/course_00220"
 writable = true

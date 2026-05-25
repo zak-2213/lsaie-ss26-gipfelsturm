@@ -3,7 +3,7 @@ new file mode 100644
 index 000000000..e61018e45
 --- /dev/null
 +++ b/megatron/fa3/fa3_dot_product_attention.py
-@@ -0,0 +1,203 @@
+@@ -0,0 +1,205 @@
 +# megatron/core/transformer/fa3_dot_product_attention.py
 +#
 +# FA3 core-attention kernel conforming to the CoreAttention / CoreAttentionBuilder
@@ -186,6 +186,7 @@ index 000000000..e61018e45
 +                causal=is_causal,
 +            )
 +            # out: [total_tokens, np, hn] → [total_tokens, np*hn]
++            # total_tokens already encodes the packed (s*b) dimension correctly.
 +            total_tokens, np, hn = out.shape
 +            return out.reshape(total_tokens, np * hn)
 +
@@ -193,20 +194,21 @@ index 000000000..e61018e45
 +        q = self._megatron_to_fa(query)   # [b, s, np, hn]
 +        k = self._megatron_to_fa(key)     # [b, s, ng, hn]
 +        v = self._megatron_to_fa(value)   # [b, s, ng, hn]
-+
++        print(q.shape, k.shape, v.shape, q.stride(), k.stride(), v.stride())
 +        out = flash_attn_func(
-+            q=q,
-+            k=k,
-+            v=v,
++            q=q.contiguous(),
++            k=k.contiguous(),
++            v=v.contiguous(),
 +            # dropout_p=dropout_p, # must be 0.0 because it's not supported in FA3
 +            softmax_scale=self.softmax_scale,
 +            causal=is_causal,
 +        )
 +        # out: [b, s, np, hn] → [s, b, np, hn] → [s*b, np*hn]
-+        # TERowParallelLinear (linear_proj) requires a 2D input with heads merged.
++        # TERowParallelLinear needs last dim = np*hn; s and b must stay separate
++        # so the residual add in bias_dropout_add works on matching [s, b, hidden].
 +        s, b, np, hn = query.shape
 +        out = self._fa_to_megatron(out)   # [s, b, np, hn]
-+        return out.reshape(s * b, np * hn)
++        return out.reshape(s, b, np * hn)
 diff --git a/megatron/fa3/gpt_layer_spec_fa3.py b/megatron/fa3/gpt_layer_spec_fa3.py
 new file mode 100644
 index 000000000..e358d08c0

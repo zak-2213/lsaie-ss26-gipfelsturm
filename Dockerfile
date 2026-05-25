@@ -33,8 +33,14 @@ ENV MAX_JOBS=32
 # RUN nvcc --version && python -c "import torch; print(torch.__version__)"
 # RUN pip list | grep torch
 
-# Build flashattn3
-RUN cd /flash-attention/hopper && python setup.py install
+# # Build naive flashattn3
+# RUN cd /flash-attention/hopper && python setup.py install
+# Build flashattn3 like before https://github.com/NVIDIA/TransformerEngine/commit/181322eb1f029c845966b1bd174c3c92fe591666
+RUN cd /flash-attention/hopper \
+    && python setup.py install \
+    && python_path=`python -c "import site; print(site.getsitepackages()[0])"` \
+    && mkdir -p $python_path/flash_attn_3 \
+    && cp flash_attn_interface.py $python_path/flash_attn_3/
 
 # # Install flash attention 3 from pre-built wheels for CUDA 13.0 and PyTorch 2.9.0 (does not have ARM support)
 # RUN pip install flash_attn_3 --find-links https://windreamer.github.io/flash-attention3-wheels/cu130_torch290

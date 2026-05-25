@@ -84,20 +84,18 @@ case $MODE in
 esac
 
 ENVIRONMENT="alps3"
-ATTN_BACKEND="AttnBackend.auto"
+ATTN_BACKEND="auto"
 TRANSFORMER_IMPL="transformer_engine"
 SPEC=""
 case $METHOD in
     fused)
         ENVIRONMENT="alps3"
-        ATTN_BACKEND="AttnBackend.fused"
+        ATTN_BACKEND="fused"
         TRANSFORMER_IMPL="transformer_engine"
         ;;
     flash)
         ENVIRONMENT=$(realpath ./flashattn3.toml)
-        # ATTN_BACKEND="AttnBackend.flash"
-        ATTN_BACKEND="flash" # Job ID: 2332087
-        # ATTN_BACKEND="1"       # Job ID: 2332092
+        # ATTN_BACKEND="flash" # this works, 1 or AttnBackend.flash don't
         # TRANSFORMER_IMPL="local"
         TRANSFORMER_IMPL="transformer_engine"
         SPEC="megatron.fa3.gpt_layer_spec_fa3 get_gpt_layer_fa3_spec"
