@@ -3,26 +3,21 @@ new file mode 100644
 index 000000000..e61018e45
 --- /dev/null
 +++ b/megatron/fa3/fa3_dot_product_attention.py
-@@ -0,0 +1,261 @@
+@@ -0,0 +1,213 @@
 +# megatron/core/transformer/fa3_dot_product_attention.py
 +#
-+# FA3 core-attention kernel for Megatron-Core, GH200 / sm90a.
++# FA3 core-attention kernel conforming to the CoreAttention / CoreAttentionBuilder
++# protocols defined in megatron/core/transformer/attention.py (main, 2025).
 +#
-+# attention_mask handling
-+# ───────────────────────
-+# FA3 does not accept an arbitrary [b,1,s,s] boolean mask.  Its masking API is:
-+#   causal=True/False      — upper-triangular causal mask
-+#   flash_attn_varlen_func — per-sample cu_seqlens for padding removal
++# The real attention.py already imports flash_attn_3 at the top of the file and
++# exposes HAVE_FA3.  This module slots into the spec system as the core_attention
++# submodule without touching any Megatron internals.
 +#
-+# Megatron's four AttnMaskType values map as follows:
-+#
-+#   causal         → padded path,  causal=True
-+#   no_mask        → padded path,  causal=False
-+#   padding        → varlen path,  causal=False  (attention_mask → cu_seqlens)
-+#   padding_causal → varlen path,  causal=True   (attention_mask → cu_seqlens)
-+#
-+# When packed_seq_params is already provided by the caller (sequence-packing
-+# training), it takes precedence and we skip mask conversion.
++# Requirements:
++#   pip install flash-attn-3   (the flash_attn_3 package, distinct from flash-attn)
++#   — or —
++#   pip install flashattn-hopper   (older Hopper-only wheel)
++#   Megatron-LM main (2025), GH200 (sm90a)
 +
 +from __future__ import annotations
 +
@@ -38,7 +33,7 @@ index 000000000..e61018e45
 +from megatron.core.transformer.transformer_config import TransformerConfig
 +from megatron.core.packed_seq_params import PackedSeqParams
 +
-+# ── FA3 import ────────────────────────────────────────────────────────────────
++# ── FA3 import (mirrors what attention.py does) ───────────────────────────────
 +try:
 +    from flash_attn_3.flash_attn_interface import flash_attn_func, flash_attn_varlen_func
 +    HAVE_FA3 = True
@@ -47,64 +42,20 @@ index 000000000..e61018e45
 +
 +if not HAVE_FA3:
 +    try:
-+        from flashattn_hopper.flash_attn_interface import flash_attn_func, flash_attn_varlen_func
-+        HAVE_FA3 = True
-+    except ImportError:
-+        pass
-+
-+if not HAVE_FA3:
-+    # Fallback: unified flash-attn >= 2.7 dispatches to Hopper kernel on sm90a
-+    try:
-+        from flash_attn.flash_attn_interface import flash_attn_func, flash_attn_varlen_func
++        from flashattn_hopper.flash_attn_interface import (
++            flash_attn_func,
++            flash_attn_varlen_func,
++        )
 +        HAVE_FA3 = True
 +    except ImportError:
 +        pass
 +
 +if not HAVE_FA3:
 +    raise ImportError(
-+        "FA3DotProductAttention requires flash_attn_3, flashattn_hopper, or "
-+        "flash-attn >= 2.7.\nInstall with:  pip install flash-attn>=2.7 --no-build-isolation"
++        "FA3DotProductAttention requires flash_attn_3 or flashattn_hopper.\n"
++        "Install with:  pip install flash-attn-3\n"
++        "GH200 (sm90a) is required for the Hopper CUTLASS kernel."
 +    )
-+
-+# ── mask-type sets ────────────────────────────────────────────────────────────
-+_CAUSAL_MASK_TYPES  = {AttnMaskType.causal, AttnMaskType.padding_causal}
-+_PADDING_MASK_TYPES = {AttnMaskType.padding, AttnMaskType.padding_causal}
-+
-+
-+def _mask_to_cu_seqlens(attention_mask: Tensor) -> tuple[Tensor, Tensor, int]:
-+    """
-+    Convert Megatron's boolean attention_mask to FA varlen inputs.
-+
-+    attention_mask: [b, 1, 1, s] or [b, 1, s, s]  — True means *keep* (not masked).
-+    Megatron sets attention_mask[b, 0, 0, i] = True for real tokens, False for padding.
-+
-+    Returns:
-+        cu_seqlens : [b+1] int32 cumulative sequence lengths
-+        seqlens    : [b]   int32 per-sample real lengths
-+        max_seqlen : int   maximum real length in this batch
-+    """
-+    # Squeeze to [b, s]: True = real token, False = padding
-+    # attention_mask may be [b,1,1,s] or [b,1,s,s]; last dim is the key dimension.
-+    mask_2d = attention_mask[:, 0, 0, :].bool()   # [b, s]
-+    seqlens = mask_2d.sum(dim=1).to(torch.int32)  # [b]
-+    max_seqlen = int(seqlens.max().item())
-+    cu_seqlens = torch.zeros(
-+        seqlens.shape[0] + 1, dtype=torch.int32, device=seqlens.device
-+    )
-+    cu_seqlens[1:] = seqlens.cumsum(0)
-+    return cu_seqlens, seqlens, max_seqlen
-+
-+
-+def _unpad(x: Tensor, attention_mask: Tensor) -> Tensor:
-+    """
-+    Remove padding tokens from [s, b, h, d] → [total_real_tokens, h, d].
-+    Picks real tokens in row-major (seq, batch) order to match cu_seqlens.
-+    """
-+    # x: [s, b, h, d]  →  [b, s, h, d]
-+    b, s = attention_mask.shape[0], x.shape[0]
-+    mask_2d = attention_mask[:, 0, 0, :].bool()   # [b, s]
-+    x_bshd = x.permute(1, 0, 2, 3)                # [b, s, h, d]
-+    return x_bshd[mask_2d]                        # [total_real, h, d]
 +
 +
 +class FA3DotProductAttention(MegatronModule):
@@ -112,13 +63,14 @@ index 000000000..e61018e45
 +    Core attention using FlashAttention-3 (GH200 / sm90a Hopper kernel).
 +
 +    Conforms to the CoreAttention + CoreAttentionBuilder protocols in
-+    megatron/core/transformer/attention.py.
++    megatron/core/transformer/attention.py so it can be used directly in a
++    SelfAttentionSubmodules spec.
 +
-+    Constructor signature matches CoreAttentionBuilder.__call__:
++    The constructor signature matches CoreAttentionBuilder.__call__:
 +        config, layer_number, attn_mask_type, attention_type,
 +        cp_comm_type, softmax_scale, pg_collection
 +
-+    Forward signature matches CoreAttention.forward:
++    The forward signature matches CoreAttention.forward:
 +        query, key, value, attention_mask, *,
 +        attn_mask_type, attention_bias, packed_seq_params
 +    """
@@ -140,6 +92,9 @@ index 000000000..e61018e45
 +        self.layer_number = layer_number
 +        self.attn_mask_type = attn_mask_type
 +
++        # cp_comm_type / pg_collection: FA3 doesn't implement context parallelism
++        # itself; if CP is enabled the caller (SelfAttention) must handle ring-attn
++        # sharding before reaching this module.
 +        if cp_comm_type is not None and cp_comm_type != "p2p":
 +            raise ValueError(
 +                f"FA3DotProductAttention does not support cp_comm_type={cp_comm_type!r}. "
@@ -155,116 +110,113 @@ index 000000000..e61018e45
 +            )
 +            self.softmax_scale = 1.0 / math.sqrt(head_dim)
 +
++        # ── dropout ──────────────────────────────────────────────────────────
 +        self.attention_dropout = config.attention_dropout
++
++        # ── causal flag ──────────────────────────────────────────────────────
++        self.is_causal = (attn_mask_type == AttnMaskType.causal)
 +
 +    # ── layout helpers ────────────────────────────────────────────────────────
 +
 +    @staticmethod
-+    def _to_fa(x: Tensor) -> Tensor:
-+        """[s, b, h, d] → [b, s, h, d]"""
++    def _megatron_to_fa(x: Tensor) -> Tensor:
++        """[s, b, h, d] → [b, s, h, d]  (FA3 is batch-first)."""
 +        return x.permute(1, 0, 2, 3).contiguous()
 +
 +    @staticmethod
-+    def _from_fa(x: Tensor) -> Tensor:
-+        """[b, s, h, d] → [s, b, h, d]"""
++    def _fa_to_megatron(x: Tensor) -> Tensor:
++        """[b, s, h, d] → [s, b, h, d]  (Megatron is seq-first)."""
 +        return x.permute(1, 0, 2, 3).contiguous()
 +
 +    # ── forward ───────────────────────────────────────────────────────────────
 +
 +    def forward(
 +        self,
-+        query: Tensor,                         # [s, b, np, hn]
-+        key: Tensor,                           # [s, b, ng, hn]
-+        value: Tensor,                         # [s, b, ng, hn]
-+        attention_mask: Optional[Tensor],      # [b, 1, 1, s] bool or None
++        query: Tensor,                          # [s, b, np, hn]
++        key: Tensor,                            # [s, b, ng, hn]
++        value: Tensor,                          # [s, b, ng, hn]
++        attention_mask: Optional[Tensor],       # unused for causal FA3
 +        *,
 +        attn_mask_type: AttnMaskType = None,
 +        attention_bias: Optional[Tensor] = None,
 +        packed_seq_params: Optional[PackedSeqParams] = None,
-+    ) -> Tensor:                               # [s, b, np*hn]
++    ) -> Tensor:                                # [s, b, np, hn]
++        """
++        Two dispatch paths:
++
++        1. Packed / variable-length  (packed_seq_params is not None)
++           Tensors arrive as [total_tokens, h, d]; use flash_attn_varlen_func.
++
++        2. Padded / standard  (packed_seq_params is None)
++           Tensors arrive as [s, b, h, d]; permute and use flash_attn_func.
++        """
 +        if attention_bias is not None:
 +            raise ValueError(
 +                "FA3DotProductAttention does not support attention_bias. "
 +                "Use TEDotProductAttention if you need ALiBi / relative bias."
 +            )
 +
-+        dropout_p = self.attention_dropout if self.training else 0.0
++        dropout_p = 0.0 # self.attention_dropout if self.training else 0.0
++        assert attention_mask is None, f"Attention Mask {attention_mask} is not valid"
 +
-+        # Resolve effective mask type (per-call override beats constructor default)
-+        effective_mask_type = attn_mask_type if attn_mask_type is not None else self.attn_mask_type
-+        is_causal  = effective_mask_type in _CAUSAL_MASK_TYPES
-+        has_padding = effective_mask_type in _PADDING_MASK_TYPES
++        np = query.shape[2]  # num query heads
++        ng = key.shape[2]    # num key heads
++        print("np, ng", np, ng)
++        assert np % ng == 0, f"FA3 requires num query heads ({np}) to be divisible by num key heads ({ng})"
 +
-+        s, b, np, hn = query.shape
-+        print(f"{packed_seq_params=}")
-+        print(f"{is_causal=}")
-+        print(f"{effective_mask_type=}")
++        # Resolve per-call causal flag (caller may override at decode time)
++        if attn_mask_type is not None:
++            is_causal = (attn_mask_type == AttnMaskType.causal)
++        else:
++            is_causal = self.is_causal
 +
-+        # ── path 1: caller already built packed_seq_params ────────────────────
-+        # (sequence-packing training; tensors are [total_tokens, h, d])
++        # ── packed path ───────────────────────────────────────────────────────
 +        if packed_seq_params is not None:
++            # packed_seq_params carries cu_seqlens_{q,kv} and max_seqlen_{q,kv}.
++            # Tensors are already [total_tokens, h, d] from the caller.
++            cu_seqlens_q  = packed_seq_params.cu_seqlens_q
++            cu_seqlens_kv = packed_seq_params.cu_seqlens_kv
++            max_seqlen_q  = packed_seq_params.max_seqlen_q
++            max_seqlen_kv = packed_seq_params.max_seqlen_kv
++
 +            out = flash_attn_varlen_func(
 +                q=query,
 +                k=key,
 +                v=value,
-+                cu_seqlens_q=packed_seq_params.cu_seqlens_q,
-+                cu_seqlens_k=packed_seq_params.cu_seqlens_kv,
-+                max_seqlen_q=packed_seq_params.max_seqlen_q,
-+                max_seqlen_k=packed_seq_params.max_seqlen_kv,
++                cu_seqlens_q=cu_seqlens_q,
++                cu_seqlens_k=cu_seqlens_kv,
++                max_seqlen_q=max_seqlen_q,
++                max_seqlen_k=max_seqlen_kv,
 +                dropout_p=dropout_p,
 +                softmax_scale=self.softmax_scale,
 +                causal=is_causal,
 +            )
 +            # out: [total_tokens, np, hn] → [total_tokens, np*hn]
-+            total_tokens = out.shape[0]
++            # total_tokens already encodes the packed (s*b) dimension correctly.
++            total_tokens, np, hn = out.shape
 +            return out.reshape(total_tokens, np * hn)
 +
-+        # ── path 2: padding mask → derive cu_seqlens, unpad, run varlen ───────
-+        # Used for padding_causal and padding mask types when attention_mask
-+        # is a [b, 1, 1, s] boolean tensor indicating real vs. pad tokens.
-+        if has_padding and attention_mask is not None:
-+            cu_seqlens, seqlens, max_seqlen = _mask_to_cu_seqlens(attention_mask)
-+
-+            # Unpad: [s, b, h, d] → [total_real, h, d]
-+            q_unpad = _unpad(query, attention_mask)
-+            k_unpad = _unpad(key,   attention_mask)
-+            v_unpad = _unpad(value, attention_mask)
-+
-+            out = flash_attn_varlen_func(
-+                q=q_unpad,
-+                k=k_unpad,
-+                v=v_unpad,
-+                cu_seqlens_q=cu_seqlens,
-+                cu_seqlens_k=cu_seqlens,
-+                max_seqlen_q=max_seqlen,
-+                max_seqlen_k=max_seqlen,
-+                dropout_p=dropout_p,
-+                softmax_scale=self.softmax_scale,
-+                causal=is_causal,
-+            )
-+            # out: [total_real, np, hn]
-+            # Re-pad to [b, s, np, hn] → [s, b, np*hn]
-+            mask_2d = attention_mask[:, 0, 0, :].bool()   # [b, s]
-+            out_padded = torch.zeros(b, s, np, hn, dtype=out.dtype, device=out.device)
-+            out_padded[mask_2d] = out
-+            # [b, s, np, hn] → [s, b, np*hn]
-+            return out_padded.permute(1, 0, 2, 3).reshape(s, b, np * hn)
-+
-+        # ── path 3: causal or no_mask — standard padded path ─────────────────
-+        q = self._to_fa(query)    # [b, s, np, hn]
-+        k = self._to_fa(key)
-+        v = self._to_fa(value)
-+
++        # ── padded path ───────────────────────────────────────────────────────
++        q = self._megatron_to_fa(query)   # [b, s, np, hn]
++        k = self._megatron_to_fa(key)     # [b, s, ng, hn]
++        v = self._megatron_to_fa(value)   # [b, s, ng, hn]
++        print(q.shape, k.shape, v.shape, q.stride(), k.stride(), v.stride(), q.dtype, q.device, q.is_contiguous(), k.is_contiguous(), v.is_contiguous())
 +        out = flash_attn_func(
-+            q=q,
-+            k=k,
-+            v=v,
++            q=q.contiguous(),
++            k=k.contiguous(),
++            v=v.contiguous(),
 +            # dropout_p=dropout_p, # must be 0.0 because it's not supported in FA3
 +            softmax_scale=self.softmax_scale,
 +            causal=is_causal,
 +        )
-+        # out: [b, s, np, hn] → [s, b, np, hn] → [s, b, np*hn]
-+        return self._from_fa(out).reshape(s, b, np * hn)
++        # out: [b, s, np, hn] → [s, b, np, hn] → [s*b, np*hn]
++        # TERowParallelLinear needs last dim = np*hn; s and b must stay separate
++        # so the residual add in bias_dropout_add works on matching [s, b, hidden].
++        s, b, np, hn = query.shape
++        out = self._fa_to_megatron(out)   # [s, b, np, hn]
++        print("OUT", out.shape, out.stride(), out.is_contiguous())
++        # return out.reshape(s, b, np * hn)
++        return out.contiguous().view(s, b, np * hn)
 diff --git a/megatron/fa3/gpt_layer_spec_fa3.py b/megatron/fa3/gpt_layer_spec_fa3.py
 new file mode 100644
 index 000000000..e358d08c0

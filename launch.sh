@@ -118,6 +118,10 @@ echo "Send mail to: ${SEND_MAIL_TO:-"none"}"
 
 ################ Model config ################
 case $MODEL_SIZE in
+    mini)
+        NUM_LAYERS=4;   HIDDEN=128;  FFN=512;   HEADS=1;  KV_HEADS=1;
+        MBS=1;  TP=1; PP=1
+        ;;
     125m)
         NUM_LAYERS=12;  HIDDEN=768;  FFN=2048;  HEADS=12; KV_HEADS=4
         MBS=16; TP=1; PP=1
