@@ -14,6 +14,8 @@
 #   FP8=1                  enable FP8 GEMMs via Transformer Engine (E4M3 fwd / E5M2 bwd)
 #   NSYS=1                 wrap training in nsys profile (writes .nsys-rep into $LOG_DIR)
 #   PAOPT=0                drop --use-precision-aware-optimizer (fallback if FP8 OOMs at FusedAdam init)
+#   NVTE_NO_CACHE=1        export NVTE_FP8_WEIGHT_CACHING=0, frees ~4-8 GB at TE init (for 32B FP8 OOM)
+#   CE_FUSION=0            drop --cross-entropy-loss-fusion, avoids torch.compile 1.54 GiB FP32 buf (for 8B FP8 OOM)
 #   RECOMPUTE=full|selective|none   override activation recompute (default: full for 32b/140b, none otherwise)
 #   OVERLAP_PARAM_GATHER=0|1        toggle --overlap-param-gather (default 1; auto-0 when FP8=1)
 #   GBS=<int>              override global batch size (default 256)
@@ -199,6 +201,23 @@ fi
 
 NSYS=${NSYS:-0}
 
+# NVTE_NO_CACHE=1: export NVTE_FP8_WEIGHT_CACHING=0 in the generated sbatch.
+# TE pre-allocates FP8 weight buffers during module init (eager caching). Disabling
+# this forces lazy/per-forward FP8 weight computation, saving ~4-8 GB exactly at
+# the FusedAdam initialize_state OOM site for 32B FP8. Costs ~5-15% throughput.
+NVTE_NO_CACHE=${NVTE_NO_CACHE:-0}
+
+# CE_FUSION=0: drop --cross-entropy-loss-fusion. The fused CE path triggers
+# torch.compile / inductor, which allocates a (seq_len, MBS, vocab_size) FP32
+# intermediate buffer (~1.54 GiB at 8B/MBS=2/vocab=50304). This buffer doesn't
+# fit on top of 8B FP8's higher memory baseline and is the root cause of the
+# 8B FP8 inductor OOM. Disabling falls back to standard PyTorch CE.
+CE_FUSION=${CE_FUSION:-1}
+CE_FUSION_ARG="--cross-entropy-loss-fusion"
+if [ "$CE_FUSION" = "0" ]; then
+    CE_FUSION_ARG=""
+fi
+
 # PAOPT=0 fallback: drop --use-precision-aware-optimizer and --main-grads-dtype bf16.
 # This bypasses TE FusedAdam (which allocates int16 remainder buffers for every
 # param upfront in initialize_state — the OOM site for 32B FP8 on a single GH200).
@@ -313,6 +332,14 @@ MASTER_PORT=25678
 
 SETUP
 
+# Optional NVTE FP8 weight-cache opt-out (saves memory at TE module init).
+if [ "$NVTE_NO_CACHE" = "1" ]; then
+    cat >> "$SCRIPT" << 'NVTE_EXPORTS'
+# Disable TE FP8 weight caching to save ~4-8 GB at module init (for 32B FP8).
+export NVTE_FP8_WEIGHT_CACHING=0
+NVTE_EXPORTS
+fi
+
 cat >> "$SCRIPT" << TE_ARGS
 TRANSFORMER_ENGINE_ARGS=(
     --transformer-impl transformer_engine
@@ -355,7 +382,7 @@ TRAINING_ARGS=(
     --log-interval 1
     --eval-interval ${EVAL_INTERVAL}
     --eval-iters ${EVAL_ITERS}
-    --cross-entropy-loss-fusion
+    ${CE_FUSION_ARG}
     --disable-bias-linear
     --optimizer adam
     --dataloader-type single
