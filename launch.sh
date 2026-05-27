@@ -19,6 +19,7 @@
 #   RECOMPUTE=full|selective|none   override activation recompute (default: full for 32b/140b, none otherwise)
 #   OVERLAP_PARAM_GATHER=0|1        toggle --overlap-param-gather (default 1; auto-0 when FP8=1)
 #   GBS=<int>              override global batch size (default 256)
+#   SEQ_LEN=<int>          override sequence length (default 4096; tags job name when != 4096)
 #   TIME_LIMIT=HH:MM:SS    override SLURM time limit (default depends on mode and model size)
 #
 # Examples:
@@ -152,8 +153,13 @@ if [ "$TOTAL_GPUS" -lt "$NEEDED_GPUS" ]; then
 fi
 
 GBS=${GBS:-256}
-SEQ_LEN=4096
-JOB_NAME="gipfel-${MODE}-${MODEL_SIZE}-${TRAINING_STEPS}s-${NODES}n"
+SEQ_LEN=${SEQ_LEN:-4096}
+# Tag SEQ_LEN into JOB_NAME when it differs from default so sweep logs are distinct.
+if [ "$SEQ_LEN" = "4096" ]; then
+    JOB_NAME="gipfel-${MODE}-${MODEL_SIZE}-${TRAINING_STEPS}s-${NODES}n"
+else
+    JOB_NAME="gipfel-${MODE}-${MODEL_SIZE}-${TRAINING_STEPS}s-${NODES}n-sl${SEQ_LEN}"
+fi
 
 ################ FP8 toggle (Samy / fp8 axis) ################
 # FP8=1 enables Transformer Engine FP8 GEMMs. BF16 stays for non-GEMM ops
